@@ -1,16 +1,17 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-generate_report.py - 微信群聊日报生成脚本
+generate_report.py - 微信群聊总结生成脚本（文本优先）
 
-整合脚本统计数据和 AI 生成内容，使用 Jinja2 渲染 HTML 报告，并转换为图片。
+整合脚本统计数据和 AI 生成内容，默认输出纯文本/Markdown 总结；
+如需 HTML，可继续使用 Jinja2 模板渲染。
 
 使用方式:
-    python generate_report.py --stats stats.json --ai-content ai_content.json --output report.png
-    
+    python generate_report.py --stats stats.json --ai-content ai_content.json --output report.md
+
 输出格式：
-    - .html 后缀：仅生成 HTML
-    - .png/.jpg 后缀：生成 HTML 并转换为图片（需要 playwright）
+    - .txt/.md 后缀：生成文本总结（默认，无需 jinja2/playwright）
+    - .html 后缀：生成 HTML（需要 jinja2）
 """
 
 import json
@@ -19,25 +20,13 @@ import datetime
 import os
 import sys
 
-try:
-    from jinja2 import Environment, FileSystemLoader
-except ImportError:
-    print("Error: 'jinja2' module not found. Please install it with: pip install jinja2")
-    sys.exit(1)
-
-
-# iPhone 14 Pro Max 视口尺寸
-VIEWPORT_WIDTH = 430
-VIEWPORT_HEIGHT = 932
-DEVICE_SCALE_FACTOR = 3  # 高清截图，3倍像素密度
-
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description='Generate WeChat daily report.')
+    parser = argparse.ArgumentParser(description='Generate WeChat summary report (text-first).')
     parser.add_argument('--stats', required=True, help='Path to statistics JSON from analyze_chat.py')
     parser.add_argument('--ai-content', required=False, default=None, help='Path to AI-generated content JSON (optional)')
     parser.add_argument('--template', default=None, help='Path to Jinja2 HTML template')
-    parser.add_argument('--output', default='report.png', help='Output file path (.html or .png/.jpg)')
+    parser.add_argument('--output', default='report.md', help='Output file path (.txt/.md/.html)')
     parser.add_argument('--clean-temp', action='store_true', help='Delete temporary files after report generation')
     return parser.parse_args()
 
@@ -157,49 +146,126 @@ def fill_ai_content_avatars(ai_content, name_avatar_map):
                 qa['answerer_avatar'] = avatar
 
 
-def html_to_image(html_path, output_path):
-    """使用 Playwright 将 HTML 转换为长图"""
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print("Error: 'playwright' module not found.")
-        print("Please install it with: pip install playwright && playwright install chromium")
-        sys.exit(1)
-    
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page(
-            viewport={'width': VIEWPORT_WIDTH, 'height': VIEWPORT_HEIGHT},
-            device_scale_factor=DEVICE_SCALE_FACTOR
-        )
-        
-        # 加载 HTML 文件
-        page.goto(f'file:///{os.path.abspath(html_path)}')
-        
-        # 等待页面加载完成
-        page.wait_for_load_state('networkidle')
+def _fmt_list(items, fallback="无"):
+    values = [str(i).strip() for i in (items or []) if str(i).strip()]
+    return "、".join(values) if values else fallback
 
-        # 长图截图前先滚动到底再回顶，触发所有区块资源加载（尤其是头像）
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(500)
-        page.evaluate("window.scrollTo(0, 0)")
-        page.wait_for_timeout(200)
 
-        # 头像为外链资源，额外等待图片加载/失败回退完成，超时则继续截图
-        try:
-            page.wait_for_function(
-                "() => Array.from(document.images).every(img => img.complete)",
-                timeout=8000
+def build_text_report(stats, ai_content):
+    meta = stats.get("meta", {})
+    lines = []
+    lines.append(f"# {meta.get('name', '群聊')} 总结")
+    lines.append("")
+    lines.append(f"- 日期: {meta.get('date', 'N/A')}")
+    lines.append(f"- 统计周期: {meta.get('time_range', 'N/A')}")
+    lines.append(f"- 总消息数: {meta.get('total_count', 0)}")
+    lines.append(f"- 活跃用户: {meta.get('active_user_count', 0)}")
+    lines.append("")
+
+    top_talkers = stats.get("top_talkers", [])
+    if top_talkers:
+        lines.append("## 话唠榜")
+        for t in top_talkers:
+            line = f"- TOP{t.get('rank', '?')}: {t.get('name', '未知')}（{t.get('count', 0)} 条）"
+            common_words = t.get("common_words", [])
+            traits = t.get("traits", [])
+            if common_words:
+                line += f"；常用词：{_fmt_list(common_words)}"
+            if traits:
+                line += f"；特点：{_fmt_list(traits)}"
+            lines.append(line)
+        lines.append("")
+
+    topics = ai_content.get("topics", [])
+    if topics:
+        lines.append("## 讨论热点")
+        for idx, topic in enumerate(topics, 1):
+            lines.append(f"{idx}. {topic.get('title', '未命名话题')}（{topic.get('category', '未分类')}）")
+            lines.append(f"   - 摘要：{topic.get('summary', '')}")
+            lines.append(f"   - 关键词：{_fmt_list(topic.get('keywords', []))}")
+            lines.append(f"   - 提及次数：{topic.get('mention_count', 0)}")
+        lines.append("")
+
+    resources = ai_content.get("resources", [])
+    if resources:
+        lines.append("## 资源分享")
+        for idx, res in enumerate(resources, 1):
+            lines.append(f"{idx}. [{res.get('type', '资源')}] {res.get('title', '未命名资源')}")
+            lines.append(
+                f"   - 分享者：{res.get('sharer', '未知')} | 时间：{res.get('time', 'N/A')} | 分类：{res.get('category', '未分类')}"
             )
-        except Exception:
-            pass
-        
-        # 截取整个页面（长图）
-        page.screenshot(path=output_path, full_page=True)
-        
-        browser.close()
-        
-    print(f"Image generated: {output_path}")
+            if res.get("description"):
+                lines.append(f"   - 简介：{res.get('description')}")
+            kp = res.get("key_points", [])
+            if kp:
+                lines.append(f"   - 要点：{_fmt_list(kp)}")
+            if res.get("url"):
+                lines.append(f"   - 链接：{res.get('url')}")
+        lines.append("")
+
+    qas = ai_content.get("qas", [])
+    if qas:
+        lines.append("## 问答精选")
+        for idx, qa in enumerate(qas, 1):
+            lines.append(f"{idx}. Q({qa.get('questioner', '未知')}): {qa.get('question', '')}")
+            lines.append(f"   - A({qa.get('answerer', '未知')}): {qa.get('answer', '')}")
+            if qa.get("tags"):
+                lines.append(f"   - 标签：{_fmt_list(qa.get('tags', []))}")
+        lines.append("")
+
+    important_messages = ai_content.get("important_messages", [])
+    if important_messages:
+        lines.append("## 重要消息")
+        for idx, msg in enumerate(important_messages, 1):
+            lines.append(
+                f"{idx}. [{msg.get('priority', '中')}] {msg.get('sender', '未知')} @ {msg.get('time', 'N/A')}: {msg.get('summary', '')}"
+            )
+            if msg.get("content"):
+                lines.append(f"   - 内容：{msg.get('content')}")
+        lines.append("")
+
+    dialogues = ai_content.get("dialogues", [])
+    if dialogues:
+        lines.append("## 有趣对话")
+        for idx, dialogue in enumerate(dialogues, 1):
+            lines.append(f"{idx}. 话题：{dialogue.get('topic', '未命名')}")
+            for msg in dialogue.get("messages", []):
+                lines.append(
+                    f"   - {msg.get('name', '未知')} {msg.get('time', 'N/A')}: {msg.get('content', '')}"
+                )
+            if dialogue.get("highlight"):
+                lines.append(f"   - 金句：{dialogue.get('highlight')}")
+        lines.append("")
+
+    topic_heat = ai_content.get("topic_heat", [])
+    if topic_heat:
+        lines.append("## 话题热度")
+        for idx, heat in enumerate(topic_heat, 1):
+            lines.append(
+                f"{idx}. {heat.get('name', '未命名话题')}：{heat.get('count', 0)} 条（{heat.get('percent', 0)}%）"
+            )
+        lines.append("")
+
+    night_owl = stats.get("night_owl")
+    if isinstance(night_owl, dict):
+        lines.append("## 深夜活跃")
+        lines.append(
+            f"- {night_owl.get('name', '未知')}（最晚活跃 {night_owl.get('last_time', 'N/A')}，深夜消息 {night_owl.get('msg_count', 0)} 条）"
+        )
+        if night_owl.get("last_msg"):
+            lines.append(f"- 最后一条：{night_owl.get('last_msg')}")
+        lines.append("")
+
+    word_cloud = stats.get("word_cloud", [])
+    if word_cloud:
+        lines.append("## 词云高频词")
+        sorted_words = sorted(word_cloud, key=lambda x: x.get("count", 0), reverse=True)
+        for idx, item in enumerate(sorted_words[:15], 1):
+            lines.append(f"{idx}. {item.get('text', '')}（{item.get('count', 0)}）")
+        lines.append("")
+
+    lines.append(f"_生成时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def main():
@@ -208,20 +274,6 @@ def main():
     # Load data
     stats = load_json(args.stats)
     ai_content = load_json(args.ai_content) if args.ai_content else {}
-    
-    # Determine template path
-    if args.template:
-        template_dir = os.path.dirname(args.template)
-        template_name = os.path.basename(args.template)
-    else:
-        # Default: look in assets/ relative to this script
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        template_dir = os.path.join(script_dir, '..', 'assets')
-        template_name = 'report_template.html'
-    
-    # Setup Jinja2
-    env = Environment(loader=FileSystemLoader(template_dir))
-    template = env.get_template(template_name)
     
     # Merge AI-generated traits into top_talkers
     top_talkers = stats.get('top_talkers', [])
@@ -247,7 +299,7 @@ def main():
     # Fill avatars for AI blocks
     fill_ai_content_avatars(ai_content, name_avatar_map)
     
-    # Prepare template context
+    # Prepare context
     context = {
         'meta': stats.get('meta', {}),
         'top_talkers': top_talkers,
@@ -257,54 +309,55 @@ def main():
         'generated_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     }
     
-    # Render HTML
-    html_output = template.render(**context)
-    
     # Determine output format
     output_ext = os.path.splitext(args.output)[1].lower()
-    
     if output_ext in ['.png', '.jpg', '.jpeg']:
-        # 生成临时 HTML，然后转图片
-        html_path = args.output.rsplit('.', 1)[0] + '.html'
-        with open(html_path, 'w', encoding='utf-8') as f:
-            f.write(html_output)
-        print(f"HTML generated: {html_path}")
-        
-        # 转换为图片
-        html_to_image(html_path, args.output)
-        
-        # 清理临时文件
-        if args.clean_temp:
-            # 获取 simplified_chat.txt 路径（兼容新旧格式）
-            text_paths = stats.get('raw_text_paths', [])
-            if not text_paths:
-                legacy = stats.get('raw_text_path')
-                if legacy:
-                    text_paths = [legacy]
-            temp_files = [
-                html_path,           # 临时 HTML
-                args.stats,          # stats.json
-                args.ai_content,     # ai_content.json
-            ] + text_paths           # simplified_chat 文件（可能多个）
-            cleanup_temp_files(temp_files)
-    else:
-        # 仅生成 HTML
+        raise RuntimeError(
+            "Image output is no longer supported in lightweight mode. "
+            "Use --output report.md (or .txt/.html)."
+        )
+
+    if output_ext in ['.txt', '.md', '']:
+        text_output = build_text_report(stats, ai_content)
+        with open(args.output, 'w', encoding='utf-8') as f:
+            f.write(text_output)
+        print(f"Text report generated: {args.output}")
+    elif output_ext == '.html':
+        try:
+            from jinja2 import Environment, FileSystemLoader
+        except ImportError:
+            raise RuntimeError(
+                "HTML output requires 'jinja2'. Install with: pip install jinja2"
+            )
+
+        if args.template:
+            template_dir = os.path.dirname(args.template)
+            template_name = os.path.basename(args.template)
+        else:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            template_dir = os.path.join(script_dir, '..', 'assets')
+            template_name = 'report_template.html'
+
+        env = Environment(loader=FileSystemLoader(template_dir))
+        template = env.get_template(template_name)
+        html_output = template.render(**context)
         with open(args.output, 'w', encoding='utf-8') as f:
             f.write(html_output)
-        print(f"Report generated: {args.output}")
-        
-        # 清理临时文件（HTML 输出时不删除 HTML 本身）
-        if args.clean_temp:
-            text_paths = stats.get('raw_text_paths', [])
-            if not text_paths:
-                legacy = stats.get('raw_text_path')
-                if legacy:
-                    text_paths = [legacy]
-            temp_files = [
-                args.stats,          # stats.json
-                args.ai_content,     # ai_content.json
-            ] + text_paths           # simplified_chat 文件（可能多个）
-            cleanup_temp_files(temp_files)
+        print(f"HTML report generated: {args.output}")
+    else:
+        raise RuntimeError("Unsupported output suffix. Use .txt/.md/.html")
+
+    if args.clean_temp:
+        text_paths = stats.get('raw_text_paths', [])
+        if not text_paths:
+            legacy = stats.get('raw_text_path')
+            if legacy:
+                text_paths = [legacy]
+        temp_files = [
+            args.stats,
+            args.ai_content,
+        ] + text_paths
+        cleanup_temp_files(temp_files)
 
 
 if __name__ == "__main__":

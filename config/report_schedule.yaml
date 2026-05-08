@@ -1,0 +1,29 @@
+# 周期总结调度配置（run-once）
+# 建议由系统任务计划每 N 分钟触发一次：
+# python scripts/schedule_report.py --config config/report_schedule.yaml
+
+interval_minutes: 60
+chatroom: 示例群名
+decrypted_dir:
+
+output_dir: outputs/reports
+work_dir: runtime/hourly
+output_format: md
+
+align_mode: floor
+min_messages: 5
+retry_times: 1
+skip_refresh: false
+
+# 单次进程最多补跑窗口数（停机后积压）
+max_catchup_windows: 24
+
+provider: stub
+provider_timeout_seconds: 90
+analyze_timeout_seconds: 600
+report_timeout_seconds: 300
+
+lock_file: runtime/schedule_report.lock
+lock_ttl_seconds: 600
+state_file: runtime/state.json
+

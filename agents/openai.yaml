@@ -1,4 +1,4 @@
 interface:
   display_name: "WeChat Daily Report"
-  short_description: "Generate a WeChat group daily report PNG from local chat data"
-  default_prompt: "Generate a mobile-friendly WeChat group daily report PNG with this exact workflow: 1) ensure decryptor is ready, 2) refresh local decrypted WeChat data, 3) list groups and confirm the target chatroom, 4) run analyze_chat.py to produce stats.json and simplified_chat text, 5) read references/ai_prompt.md plus stats.json plus simplified_chat text and then generate a valid ai_content.json, 6) only after ai_content.json exists, run generate_report.py to render the final PNG. Do not skip step 5, and do not generate a stats-only report."
+  short_description: "Generate a WeChat group summary text report from local chat data"
+  default_prompt: "Generate a WeChat group summary text report with this exact workflow: 1) ensure decryptor is ready, 2) refresh local decrypted WeChat data, 3) list groups and confirm the target chatroom, 4) run analyze_chat.py to produce stats.json and simplified_chat text, 5) read references/ai_prompt.md plus stats.json plus simplified_chat text and then generate a valid ai_content.json, 6) only after ai_content.json exists, run generate_report.py with --output report.md to render the final text report. Do not skip step 5, and do not generate a stats-only report."
