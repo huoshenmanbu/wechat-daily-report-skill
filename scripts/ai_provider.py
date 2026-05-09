@@ -1,138 +1,74 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ai_provider.py - 可插拔 AI 内容提供层（首版 stub）
+ai_provider.py - 可插拔 AI 内容提供层
 
-输入: stats.json
+输入: stats.json（可选精简聊天文本路径）
 输出: ai_content.json
 
-当前默认 provider=stub，不调用外部模型，保证调度链路可运行。
+provider: stub | cursor_cli | dashscope（预留）| volc_ark（预留）
 """
+
+from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-
-def _load_json(path: str) -> Dict[str, Any]:
-    if not path or not os.path.exists(path):
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+from ai_providers.common.load_context import load_stats_and_chat
+from ai_providers.common.normalize import normalize_ai_content
+from ai_providers.common.prompt import build_prompt_bundle
+from ai_providers.registry import run_provider
 
 
 def _dump_json(path: str, data: Dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
 
-def _build_stub_topics(word_cloud: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    top_words = sorted(word_cloud or [], key=lambda x: x.get("count", 0), reverse=True)[:3]
-    topics = []
-    for idx, w in enumerate(top_words, 1):
-        word = w.get("text", f"话题{idx}")
-        count = int(w.get("count", 0))
-        topics.append(
-            {
-                "title": f"{word} 讨论",
-                "category": "群聊动态",
-                "summary": f"本时段围绕“{word}”有持续讨论，建议结合原文回看重点信息。",
-                "keywords": [word],
-                "mention_count": count,
-            }
-        )
-    return topics
+def generate_ai_content(
+    provider: str,
+    stats_path: str,
+    output_path: str,
+    *,
+    text_path: Optional[str] = None,
+    provider_options: Optional[Dict[str, Any]] = None,
+    max_chat_chars: Optional[int] = None,
+    repo_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Generate ai_content.json using the selected backend and write to output_path.
 
+    text_path: simplified_chat file for this window (schedule_report passes it).
+    provider_options: merged contents of config/ai_providers.json (nested by backend).
+    max_chat_chars: cap total chars read from chat files (both OS consistent).
+    repo_root: repository root for Cursor --workspace and references/ai_prompt.md.
+    """
+    root = repo_root or str(Path(__file__).resolve().parent.parent)
+    stats, chat_text = load_stats_and_chat(
+        stats_path,
+        text_path,
+        max_chat_chars=max_chat_chars,
+    )
+    provider_key = (provider or "stub").strip().lower()
+    prompt_text = ""
+    if provider_key != "stub":
+        prompt_text = build_prompt_bundle(root, stats, chat_text)
 
-def _build_stub_talker_profiles(top_talkers: List[Dict[str, Any]]) -> Dict[str, Dict[str, List[str]]]:
-    profiles: Dict[str, Dict[str, List[str]]] = {}
-    for t in top_talkers or []:
-        name = t.get("name")
-        if not name:
-            continue
-        count = int(t.get("count", 0))
-        common_words = t.get("common_words", [])
-        traits = [f"本时段发言 {count} 条", "活跃参与"]
-        if common_words:
-            traits.append(f"关注词：{common_words[0]}")
-        profiles[name] = {"traits": traits[:3]}
-    return profiles
-
-
-def _build_stub_topic_heat(word_cloud: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    top_words = sorted(word_cloud or [], key=lambda x: x.get("count", 0), reverse=True)[:5]
-    total = sum(int(w.get("count", 0)) for w in top_words) or 1
-    colors = ["var(--wx-green)", "var(--wx-blue)", "var(--wx-orange)", "#888888", "#FA5151"]
-    result = []
-    for idx, w in enumerate(top_words):
-        count = int(w.get("count", 0))
-        percent = round(count * 100 / total)
-        result.append(
-            {
-                "name": str(w.get("text", f"话题{idx+1}")),
-                "count": count,
-                "percent": percent,
-                "color": colors[idx % len(colors)],
-            }
-        )
-    return result
-
-
-def build_stub_ai_content(stats: Dict[str, Any]) -> Dict[str, Any]:
-    word_cloud = stats.get("word_cloud", [])
-    top_talkers = stats.get("top_talkers", [])
-    # 占位问答：满足 ai_prompt 对 qas 数量的约定，便于模板与人工对照（stub 非真实推理）
-    stub_qas = [
-        {
-            "questioner": "（占位）",
-            "question_time": "",
-            "question": "本时段是否有明确提问？stub 模式下请结合 simplified_chat 人工复核。",
-            "tags": ["占位", "stub"],
-            "answerer": "（占位）",
-            "answer_time": "",
-            "answer": "stub provider 未读取全文对话；接入真实 AI provider 后将自动生成问答摘要。",
-            "is_best": True,
-        },
-        {
-            "questioner": "（占位）",
-            "question_time": "",
-            "question": "有无资源/链接值得单独列出？",
-            "tags": ["占位"],
-            "answerer": "（占位）",
-            "answer_time": "",
-            "answer": "请查看 stats 与原文导出；stub 未做链接抽取。",
-            "is_best": False,
-        },
-        {
-            "questioner": "（占位）",
-            "question_time": "",
-            "question": "低活跃时段是否需要跳过推送？",
-            "tags": ["占位"],
-            "answerer": "（占位）",
-            "answer_time": "",
-            "answer": "可由 schedule 配置 min_messages 控制降级策略。",
-            "is_best": False,
-        },
-    ]
-    return {
-        "topics": _build_stub_topics(word_cloud),
-        "resources": [],
-        "important_messages": [],
-        "dialogues": [],
-        "qas": stub_qas,
-        "topic_heat": _build_stub_topic_heat(word_cloud),
-        "talker_profiles": _build_stub_talker_profiles(top_talkers),
-    }
-
-
-def generate_ai_content(provider: str, stats_path: str, output_path: str) -> Dict[str, Any]:
-    stats = _load_json(stats_path)
-    provider_name = (provider or "stub").strip().lower()
-    if provider_name != "stub":
-        raise RuntimeError(f"Unsupported provider: {provider_name}. Current supported provider: stub")
-
-    ai_content = build_stub_ai_content(stats)
-    _dump_json(output_path, ai_content)
-    return ai_content
-
+    raw = run_provider(
+        provider_key,
+        stats=stats,
+        stats_path=stats_path,
+        output_path=output_path,
+        chat_text=chat_text,
+        repo_root=root,
+        provider_options=provider_options or {},
+        prompt_text=prompt_text,
+    )
+    normalized = normalize_ai_content(raw, stats)
+    _dump_json(output_path, normalized)
+    return normalized

@@ -79,6 +79,11 @@ Claude 将自动调用本项目中的脚本，从解密后的原始数据库读�
 - `min_messages`: 低活跃阈值（低于阈值走精简内容）
 - `max_catchup_windows`: 单次运行最多补跑几个积压窗口（默认 24）
 - `analyze_timeout_seconds` / `report_timeout_seconds` / `provider_timeout_seconds`: 子进程与 Provider 超时（秒）
+- `provider`: `stub`（默认，离线占位）| `cursor_cli`（调用本机 Cursor CLI）| `dashscope` / `volc_ark`（预留，尚未实现）
+- `provider_config_file`: 可选，指向 JSON（见 `config/ai_providers.example.json`），按后端分区的参数（如 `cursor_cli.command`）
+- `max_chat_chars`: 可选，读取精简聊天文本时的总字符上限（默认 `80000`，Windows/macOS 行为一致）
+
+**Cursor CLI（`provider: cursor_cli`）**：需已安装 Cursor CLI，并将 `agent`（或 `["cursor","agent"]`）放在 `PATH`，或把完整命令前缀写在 `provider_config_file` 的 `cursor_cli.command` 数组中。调度进程需能访问 **`CURSOR_API_KEY`**（Windows 任务计划 / macOS launchd / cron 里配置环境变量）。非交互模式仍可能对工作区产生副作用，若介意请使用专用克隆目录或查阅 Cursor 文档中的 workspace/worktree 选项。
 
 配置里整数项若**写了空值或非数字**，启动时会得到**明确字段名**的错误提示（避免 `ValueError: invalid literal for int()` 难排查）。`analyze` / `generate_report` 为子进程超时；`provider_timeout_seconds` 用线程等待上限——超时后调度会继续（并写入兜底 `ai_content`），但 **Python 线程无法像子进程一样被强制杀掉**，stub 几乎瞬时无影响；接入真实 HTTP/模型调用时请在客户端再设超时或可中断逻辑。
 
@@ -96,9 +101,13 @@ python scripts/schedule_report.py --config config/report_schedule.yaml
 python scripts/schedule_report.py --config config/report_schedule.yaml --dry-run
 ```
 
-### 3) Windows 任务计划（推荐）
+### 3) 定时任务（Windows / macOS）
 
-创建一个任务，每 `N` 分钟执行一次上面的 run-once 命令即可。脚本内部已做：
+**Windows**：任务计划程序创建任务，按间隔运行上面的 run-once；「起始于」填写仓库根目录，并把 `CURSOR_API_KEY` 等写入任务的环境变量（若使用 `cursor_cli`）。
+
+**macOS**：可用 `launchd`（plist 里设置 `EnvironmentVariables`）或 `cron`，同样先 `cd` 到仓库根再调用 `python scripts/schedule_report.py ...`。
+
+脚本内部已做：
 
 - 锁文件并发保护（防止重叠触发）
 - 过期锁自动回收

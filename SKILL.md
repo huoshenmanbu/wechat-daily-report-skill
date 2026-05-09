@@ -84,4 +84,4 @@ python scripts/schedule_report.py --config config/report_schedule.yaml
 
 - 周期、群名、输出格式、阈值等在 `config/report_schedule.yaml` 配置
 - 脚本内置并发锁、过期锁回收、状态原子写、窗口幂等与补跑
-- 默认 `provider=stub`，先保证链路可运行；stub **不**等价于阅读 `references/ai_prompt.md` 的高质量摘要。若仍要人工级摘要，请按需改为读取提示词并生成 `ai_content.json` 的流程，或替换 `scripts/ai_provider.py` 中的真实 Provider
+- 调度脚本 `schedule_report.py` 支持 `provider`: `stub` | `cursor_cli` | `dashscope`（预留）| `volc_ark`（预留）；详见 `config/report_schedule.yaml` 与 `config/ai_providers.example.json`。`stub` 为离线占位；`cursor_cli` 需本机 Cursor CLI 与 `CURSOR_API_KEY`。高质量摘要仍可由 Skill 手工步骤生成 `ai_content.json`，或使用 `cursor_cli` / 未来 HTTP Provider。

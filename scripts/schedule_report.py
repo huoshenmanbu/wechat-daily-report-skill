@@ -121,6 +121,8 @@ def _load_config(path: str) -> Dict[str, Any]:
         "lock_ttl_seconds": _parse_int_field(data, "lock_ttl_seconds", 600, minimum=1),
         "state_file": str(data.get("state_file", "runtime/state.json")).strip(),
         "python_executable": str(data.get("python_executable", sys.executable)).strip() or sys.executable,
+        "provider_config_file": str(data.get("provider_config_file", "")).strip(),
+        "max_chat_chars": _parse_int_field(data, "max_chat_chars", 80000, minimum=100),
     }
     if not cfg["chatroom"]:
         raise ValueError("Config `chatroom` is required.")
@@ -128,6 +130,24 @@ def _load_config(path: str) -> Dict[str, Any]:
         raise ValueError("Config `output_format` must be one of: md, txt, html.")
     if cfg["align_mode"] not in ("floor", "rolling"):
         raise ValueError("Config `align_mode` must be one of: floor, rolling.")
+    _providers_allowed = {"stub", "cursor_cli", "dashscope", "volc_ark"}
+    if cfg["provider"] not in _providers_allowed:
+        raise ValueError(
+            f"Config `provider` must be one of {sorted(_providers_allowed)}, got {cfg['provider']!r}."
+        )
+
+    pcf = cfg["provider_config_file"]
+    if pcf:
+        pth = Path(pcf)
+        if not pth.is_absolute():
+            pth = REPO_ROOT / pth
+        if not pth.is_file():
+            raise FileNotFoundError(f"provider_config_file not found: {pth}")
+        with open(pth, "r", encoding="utf-8") as f:
+            cfg["provider_options"] = json.load(f)
+    else:
+        cfg["provider_options"] = {}
+
     return cfg
 
 
@@ -289,11 +309,24 @@ def _build_paths(cfg: Dict[str, Any], start: dt.datetime, end: dt.datetime) -> D
     }
 
 
-def _run_provider_with_timeout(cfg: Dict[str, Any], stats_path: str, ai_path: str) -> None:
+def _run_provider_with_timeout(
+    cfg: Dict[str, Any],
+    stats_path: str,
+    ai_path: str,
+    text_path: str,
+) -> None:
     timeout = max(cfg["provider_timeout_seconds"], 1)
 
     def _call():
-        generate_ai_content(cfg["provider"], stats_path, ai_path)
+        generate_ai_content(
+            cfg["provider"],
+            stats_path,
+            ai_path,
+            text_path=text_path,
+            provider_options=cfg.get("provider_options"),
+            max_chat_chars=cfg.get("max_chat_chars"),
+            repo_root=str(REPO_ROOT),
+        )
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         fut = pool.submit(_call)
@@ -377,7 +410,7 @@ def process_one_window(cfg: Dict[str, Any], start: dt.datetime, end: dt.datetime
         print("[scheduler] low activity, using minimal ai_content")
     else:
         try:
-            _run_provider_with_timeout(cfg, paths["stats"], paths["ai"])
+            _run_provider_with_timeout(cfg, paths["stats"], paths["ai"], paths["text"])
         except Exception as e:
             print(f"[provider] fallback to minimal ai_content because: {e}")
             with open(paths["ai"], "w", encoding="utf-8") as f:
