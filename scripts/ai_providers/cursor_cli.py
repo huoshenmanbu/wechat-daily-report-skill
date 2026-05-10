@@ -22,16 +22,29 @@ _WINDOWS_AGENT_CMDLINE_CHARS = 28000
 def _digest_score(d: Dict[str, Any]) -> int:
     """Heuristic score for ai_content-like dicts; higher means closer match."""
     score = 0
-    required_list_keys = ("topics", "resources", "important_messages", "dialogues", "qas", "topic_heat")
-    for k in required_list_keys:
+    # Legacy schema signals
+    legacy_list_keys = ("topics", "resources", "important_messages", "dialogues", "qas", "topic_heat")
+    for k in legacy_list_keys:
         if isinstance(d.get(k), list):
             score += 2
     if isinstance(d.get("talker_profiles"), dict):
         score += 2
-    if "topics" in d:
-        topics = d.get("topics")
-        if isinstance(topics, list) and topics:
+    # New compact schema signals
+    new_list_keys = (
+        "topics",
+        "member_sentiment",
+        "investment_meme_focus",
+        "key_information",
+        "important_messages",
+    )
+    for k in new_list_keys:
+        if isinstance(d.get(k), list):
             score += 2
+    if isinstance(d.get("summary"), dict):
+        score += 3
+    topics = d.get("topics")
+    if isinstance(topics, list) and topics:
+        score += 2
     return score
 
 
@@ -62,7 +75,7 @@ def _deep_find_digest_dict(obj: Any) -> Optional[Dict[str, Any]]:
             visit(d)
 
     visit(obj)
-    # 6 keys * 2 + talker_profiles(2) = 14; require at least half shape confidence.
+    # Mixed legacy/new schemas; require moderate confidence.
     return best if best is not None and best_score >= 7 else None
 
 
@@ -241,22 +254,23 @@ def run_cursor_cli(
 
     original_len = len(prompt)
     p = prompt
-    cmdline_limit = int(opts.get("cmdline_char_limit") or 0)
-    if cmdline_limit <= 0:
-        cmdline_limit = _WINDOWS_AGENT_CMDLINE_CHARS if sys.platform == "win32" else _MAX_CMDLINE_CHARS
-    while _estimate_cmdline_chars(base + [p]) > cmdline_limit:
-        if len(p) <= 256:
-            raise RuntimeError(
-                "cursor_cli: prompt cannot fit Windows argv limit even after truncation; "
-                "lower max_chat_chars or shorten ai_prompt.md usage."
+    if sys.platform != "win32":
+        cmdline_limit = int(opts.get("cmdline_char_limit") or 0)
+        if cmdline_limit <= 0:
+            cmdline_limit = _MAX_CMDLINE_CHARS
+        while _estimate_cmdline_chars(base + [p]) > cmdline_limit:
+            if len(p) <= 256:
+                raise RuntimeError(
+                    "cursor_cli: prompt cannot fit command-line limit even after truncation; "
+                    "lower max_chat_chars or shorten ai_prompt.md usage."
+                )
+            p = p[: max(256, len(p) - max(400, len(p) // 8))]
+        if len(p) < original_len:
+            print(
+                f"[cursor_cli] prompt truncated for argv safety: {original_len} -> {len(p)} chars "
+                f"(cmdline cap ~{cmdline_limit}); reduce max_chat_chars if output degrades.",
+                file=sys.stderr,
             )
-        p = p[: max(256, len(p) - max(400, len(p) // 8))]
-    if len(p) < original_len:
-        print(
-            f"[cursor_cli] prompt truncated for argv safety: {original_len} -> {len(p)} chars "
-            f"(cmdline cap ~{cmdline_limit}); reduce max_chat_chars if output degrades.",
-            file=sys.stderr,
-        )
 
     # Windows: 默认不使用 CREATE_NO_WINDOW（某些 Cursor CLI 版本在隐藏窗口时不写临时文件）
     # 需要隐藏控制台窗口时再设 cursor_cli.hide_window: true。

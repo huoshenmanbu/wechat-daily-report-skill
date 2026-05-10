@@ -13,6 +13,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from report_senders.common.payload import build_text_payload  # noqa: E402
+from report_senders.common.payload import build_text_payload_chunks  # noqa: E402
 from report_senders.common.sanitize import redact_sensitive  # noqa: E402
 from report_senders.feishu_cli_webhook import send_feishu_cli_webhook  # noqa: E402
 from report_senders.feishu_cli_webhook import _resolve_args_template  # noqa: E402
@@ -28,6 +29,17 @@ class PayloadTests(unittest.TestCase):
             data = build_text_payload(str(p), chatroom="g", window_id="w", max_chars=200)
             self.assertIn("…[truncated]", data["text"])
             self.assertIn("群聊总结", data["title"])
+
+    def test_payload_chunks_split_when_long(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "r.md"
+            p.write_text("B" * 1200, encoding="utf-8")
+            max_chars = 300
+            chunks = build_text_payload_chunks(str(p), chatroom="g", window_id="w", max_chars=max_chars)
+            self.assertGreaterEqual(len(chunks), 2)
+            self.assertIn("(1/", chunks[0]["text"])
+            self.assertIn("本地文件:", chunks[-1]["text"])
+            self.assertTrue(all(len(c["text"]) <= max_chars for c in chunks))
 
 
 class SanitizeTests(unittest.TestCase):

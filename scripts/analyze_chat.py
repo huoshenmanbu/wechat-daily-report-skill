@@ -332,8 +332,7 @@ def analyze(args):
             time_range_str += f"~{end_dt_g.strftime('%H:%M')}"
 
         # 构建消息片段
-        # 1. 去除内容换行  2. 合并连续同一发言人  3. 截断超长单条
-        MAX_CONTENT_LENGTH = 200  # 单条消息内容上限
+        # 1. 去除内容换行  2. 合并连续同一发言人
         segments = []
         prev_name = None
         for m in group:
@@ -343,8 +342,6 @@ def analyze(args):
             content = content.replace('\r', '').replace('\n', ' ').strip()
             if not content:
                 continue
-            if len(content) > MAX_CONTENT_LENGTH:
-                content = content[:MAX_CONTENT_LENGTH] + '...'
             name = get_display_name(m)
             if name == prev_name and segments:
                 # 同一发言人连续消息，用 / 合并到上一条
@@ -352,10 +349,6 @@ def analyze(args):
             else:
                 segments.append(f"{name}:{content}")
                 prev_name = name
-
-        # 截断合并后过长的片段（同一人连发多条拼接后可能很长）
-        MAX_SEGMENT_LENGTH = 500
-        segments = [s[:MAX_SEGMENT_LENGTH] + '...' if len(s) > MAX_SEGMENT_LENGTH else s for s in segments]
 
         # 合并为一行，超长则拆分
         prefix = f"[{time_range_str}] "

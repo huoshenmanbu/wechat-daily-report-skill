@@ -1,0 +1,27 @@
+{
+  "feishu_cli_webhook": {
+    "command": ["feishu-cli"],
+    "webhook_url_env": "FEISHU_RECEIVE_ID",
+    "webhook_secret_env": "FEISHU_UNUSED",
+    "message_format": "text",
+    "args_template": [
+      "msg",
+      "send",
+      "--receive-id-type",
+      "chat_id",
+      "--receive-id",
+      "__WEBHOOK__",
+      "--msg-type",
+      "__MSG_TYPE__",
+      "--text",
+      "__CONTENT__"
+    ]
+  },
+  "feishu_cli_card": {
+    "command": ["feishu-cli"]
+  },
+  "feishu_im_api": {
+    "app_id_env": "FEISHU_APP_ID",
+    "app_secret_env": "FEISHU_APP_SECRET"
+  }
+}

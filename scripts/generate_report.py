@@ -157,7 +157,14 @@ def _ai_narrative_empty(ai_content):
         return True
     return not any(
         ai_content.get(k)
-        for k in ("topics", "qas", "dialogues", "important_messages", "resources", "topic_heat")
+        for k in (
+            "topics",
+            "important_messages",
+            "summary",
+            "member_sentiment",
+            "investment_meme_focus",
+            "key_information",
+        )
     )
 
 
@@ -231,21 +238,21 @@ def build_text_report(stats, ai_content, stats_json_path: str = ""):
     lines.append(f"- 日期: {meta.get('date', 'N/A')}")
     lines.append(f"- 统计周期: {meta.get('time_range', 'N/A')}")
     lines.append(f"- 总消息数: {meta.get('total_count', 0)}")
-    lines.append(f"- 活跃用户: {meta.get('active_user_count', 0)}")
     lines.append("")
 
-    top_talkers = stats.get("top_talkers", [])
-    if top_talkers:
-        lines.append("## 话唠榜")
-        for t in top_talkers:
-            line = f"- TOP{t.get('rank', '?')}: {t.get('name', '未知')}（{t.get('count', 0)} 条）"
-            common_words = t.get("common_words", [])
-            traits = t.get("traits", [])
-            if common_words:
-                line += f"；常用词：{_fmt_list(common_words)}"
-            if traits:
-                line += f"；特点：{_fmt_list(traits)}"
-            lines.append(line)
+    # NOTE: "话唠榜" intentionally hidden in report output.
+    # Stats are still computed and can be used by downstream logic if needed.
+
+    summary = ai_content.get("summary", {})
+    if isinstance(summary, dict) and summary:
+        lines.append("## 本段概览")
+        if summary.get("overview"):
+            lines.append(f"- 摘要：{summary.get('overview')}")
+        if summary.get("group_sentiment"):
+            lines.append(f"- 情绪：{summary.get('group_sentiment')}")
+        kws = summary.get("keywords", [])
+        if kws:
+            lines.append(f"- 关键词：{_fmt_list(kws)}")
         lines.append("")
 
     if _ai_narrative_empty(ai_content) and stats_json_path:
@@ -270,11 +277,27 @@ def build_text_report(stats, ai_content, stats_json_path: str = ""):
         for idx, topic in enumerate(topics, 1):
             lines.append(f"{idx}. {topic.get('title', '未命名话题')}（{topic.get('category', '未分类')}）")
             lines.append(f"   - 摘要：{topic.get('summary', '')}")
-            lines.append(f"   - 关键词：{_fmt_list(topic.get('keywords', []))}")
-            lines.append(f"   - 提及次数：{topic.get('mention_count', 0)}")
+            related_people = topic.get("related_people", [])
+            if related_people:
+                lines.append(f"   - 相关成员：{_fmt_list(related_people)}")
+            if topic.get("heat") not in (None, ""):
+                lines.append(f"   - 热度：{topic.get('heat')}")
         lines.append("")
 
-    resources = ai_content.get("resources", [])
+    member_sentiment = ai_content.get("member_sentiment", [])
+    if member_sentiment:
+        lines.append("## 成员情绪")
+        for idx, row in enumerate(member_sentiment, 1):
+            lines.append(
+                f"{idx}. {row.get('name', '未知')}：{row.get('sentiment', '中性')} / {row.get('stance', '观望')}"
+            )
+            if row.get("evidence"):
+                lines.append(f"   - 依据：{row.get('evidence')}")
+        lines.append("")
+
+    resources = ai_content.get("knowledge_and_resources", [])
+    if not resources:
+        resources = ai_content.get("resources", [])
     if resources:
         lines.append("## 资源分享")
         for idx, res in enumerate(resources, 1):
@@ -291,38 +314,71 @@ def build_text_report(stats, ai_content, stats_json_path: str = ""):
                 lines.append(f"   - 链接：{res.get('url')}")
         lines.append("")
 
-    qas = ai_content.get("qas", [])
-    if qas:
-        lines.append("## 问答精选")
-        for idx, qa in enumerate(qas, 1):
-            lines.append(f"{idx}. Q({qa.get('questioner', '未知')}): {qa.get('question', '')}")
-            lines.append(f"   - A({qa.get('answerer', '未知')}): {qa.get('answer', '')}")
-            if qa.get("tags"):
-                lines.append(f"   - 标签：{_fmt_list(qa.get('tags', []))}")
+    focus_list = ai_content.get("investment_meme_focus", [])
+    if not focus_list:
+        focus_list = ai_content.get("watchlist", [])
+    if focus_list:
+        lines.append("## 投资与 Meme 重点")
+        for idx, w in enumerate(focus_list, 1):
+            symbol = w.get("symbol_or_theme", w.get("symbol", "UNKNOWN"))
+            bias = w.get("market_bias", w.get("bias", "观望"))
+            confidence = w.get("confidence", "")
+            lines.append(f"{idx}. {symbol}（{bias}）")
+            w_type = w.get("type")
+            if w_type:
+                lines.append(f"   - 类型：{w_type}")
+            if confidence != "":
+                lines.append(f"   - 置信度：{confidence}")
+            reason = w.get("why_mentioned", w.get("reason", ""))
+            if reason:
+                lines.append(f"   - 原因：{reason}")
+            conditions = w.get("key_signals", w.get("conditions", []))
+            if conditions:
+                lines.append(f"   - 观察条件：{_fmt_list(conditions)}")
+            risk = w.get("risks", w.get("risk", []))
+            if risk:
+                lines.append(f"   - 风险：{_fmt_list(risk)}")
+        lines.append("")
+
+    key_info = ai_content.get("key_information", [])
+    if key_info:
+        lines.append("## 关键信息与重点信息")
+        for idx, item in enumerate(key_info, 1):
+            lines.append(f"{idx}. [{item.get('level', '重点')}] {item.get('title', '未命名信息')}")
+            if item.get("detail"):
+                lines.append(f"   - 详情：{item.get('detail')}")
+            source_people = item.get("source_people", [])
+            if source_people:
+                lines.append(f"   - 来源成员：{_fmt_list(source_people)}")
+            if item.get("time_range"):
+                lines.append(f"   - 时间段：{item.get('time_range')}")
+            if item.get("action_or_followup"):
+                lines.append(f"   - 后续动作：{item.get('action_or_followup')}")
         lines.append("")
 
     important_messages = ai_content.get("important_messages", [])
     if important_messages:
         lines.append("## 重要消息")
         for idx, msg in enumerate(important_messages, 1):
+            sender = msg.get("sender", msg.get("speaker", "未知"))
+            summary = msg.get("summary", msg.get("message", ""))
             lines.append(
-                f"{idx}. [{msg.get('priority', '中')}] {msg.get('sender', '未知')} @ {msg.get('time', 'N/A')}: {msg.get('summary', '')}"
+                f"{idx}. [{msg.get('priority', '中')}] {sender} @ {msg.get('time', 'N/A')}: {summary}"
             )
-            if msg.get("content"):
-                lines.append(f"   - 内容：{msg.get('content')}")
+            content = msg.get("content", msg.get("message", ""))
+            if content:
+                lines.append(f"   - 内容：{content}")
         lines.append("")
 
-    dialogues = ai_content.get("dialogues", [])
-    if dialogues:
-        lines.append("## 有趣对话")
-        for idx, dialogue in enumerate(dialogues, 1):
-            lines.append(f"{idx}. 话题：{dialogue.get('topic', '未命名')}")
-            for msg in dialogue.get("messages", []):
-                lines.append(
-                    f"   - {msg.get('name', '未知')} {msg.get('time', 'N/A')}: {msg.get('content', '')}"
-                )
-            if dialogue.get("highlight"):
-                lines.append(f"   - 金句：{dialogue.get('highlight')}")
+    # Optional compatibility blocks (older schema)
+    qas = ai_content.get("qas", [])
+    if qas:
+        lines.append("## 问答精选")
+        for idx, qa in enumerate(qas, 1):
+            q = qa.get("question", qa.get("q", ""))
+            a = qa.get("answer", qa.get("a", ""))
+            lines.append(f"{idx}. Q: {q}")
+            lines.append(f"   - A: {a}")
         lines.append("")
 
     topic_heat = ai_content.get("topic_heat", [])

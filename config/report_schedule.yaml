@@ -19,17 +19,18 @@ skip_refresh: false
 max_catchup_windows: 24
 
 provider: cursor_cli
-provider_timeout_seconds: 90
+provider_timeout_seconds: 180
 analyze_timeout_seconds: 600
 report_timeout_seconds: 300
+max_chat_chars: 200000
 
 # 发送通道（none | feishu_cli_webhook | feishu_cli_card | feishu_im_api）
-sender: none
+sender: feishu_cli_webhook
 sender_timeout_seconds: 30
 sender_retry_times: 1
 sender_retry_backoff_seconds: 2
 sender_strict: false
-sender_config_file:
+sender_config_file: config/senders.json
 feishu_message_max_chars: 3000
 
 lock_file: runtime/schedule_report.lock

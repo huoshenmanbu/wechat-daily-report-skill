@@ -25,10 +25,10 @@ try:
 except ModuleNotFoundError:
     from ai_provider import generate_ai_content
 try:
-    from scripts.report_senders.common.payload import build_text_payload
+    from scripts.report_senders.common.payload import build_text_payload_chunks
     from scripts.report_senders.registry import send_report_with_retry
 except ModuleNotFoundError:
-    from report_senders.common.payload import build_text_payload
+    from report_senders.common.payload import build_text_payload_chunks
     from report_senders.registry import send_report_with_retry
 
 # 仓库根目录（用于子进程 cwd，避免任务计划工作目录非仓库根时失败）
@@ -434,20 +434,40 @@ def _run_sender_with_timeout(
             "attempts": 0,
         }
 
-    payload = build_text_payload(
+    payloads = build_text_payload_chunks(
         report_path,
         chatroom=cfg.get("chatroom", ""),
         window_id=window_id,
         max_chars=cfg.get("feishu_message_max_chars", 3000),
     )
-    return send_report_with_retry(
-        sender,
-        payload,
-        cfg.get("sender_options") or {},
-        timeout_seconds=cfg.get("sender_timeout_seconds", 30),
-        retry_times=cfg.get("sender_retry_times", 1),
-        retry_backoff_seconds=cfg.get("sender_retry_backoff_seconds", 2),
-    )
+    last_ok: Dict[str, Any] = {
+        "ok": True,
+        "provider": sender,
+        "message_id": None,
+        "error_code": None,
+        "error": None,
+        "attempts": 0,
+    }
+    total_attempts = 0
+    for idx, payload in enumerate(payloads, start=1):
+        out = send_report_with_retry(
+            sender,
+            payload,
+            cfg.get("sender_options") or {},
+            timeout_seconds=cfg.get("sender_timeout_seconds", 30),
+            retry_times=cfg.get("sender_retry_times", 1),
+            retry_backoff_seconds=cfg.get("sender_retry_backoff_seconds", 2),
+        )
+        total_attempts += int(out.get("attempts", 0))
+        if not out.get("ok"):
+            out["attempts"] = total_attempts
+            out["error"] = f"chunk {idx}/{len(payloads)} failed: {out.get('error')}"
+            return out
+        last_ok = out
+    last_ok["attempts"] = total_attempts
+    if len(payloads) > 1:
+        print(f"[sender] split report into {len(payloads)} messages")
+    return last_ok
 
 
 def process_one_window(

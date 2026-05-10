@@ -44,7 +44,8 @@ def build_prompt_bundle(repo_root: str, stats: Dict[str, Any], chat_text: str) -
         "",
         "Output requirements:",
         "- Valid UTF-8 JSON object matching the schema described in ai_prompt.md.",
-        '- Include keys: topics, resources, important_messages, dialogues, qas, topic_heat, talker_profiles.',
+        "- Use ai_prompt.md as the single source of truth for required keys and field names.",
+        "- Prefer complete output across all major sections defined by ai_prompt.md.",
         "- Do not write files; respond with JSON text only.",
     ]
     return "\n".join(parts)

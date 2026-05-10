@@ -49,10 +49,13 @@ def generate_ai_content(
     repo_root: repository root for Cursor --workspace and references/ai_prompt.md.
     """
     root = repo_root or str(Path(__file__).resolve().parent.parent)
+    chat_char_cap = max_chat_chars
+    if isinstance(chat_char_cap, int) and chat_char_cap <= 0:
+        chat_char_cap = None
     stats, chat_text = load_stats_and_chat(
         stats_path,
         text_path,
-        max_chat_chars=max_chat_chars,
+        max_chat_chars=chat_char_cap,
     )
     provider_key = (provider or "stub").strip().lower()
     prompt_text = ""

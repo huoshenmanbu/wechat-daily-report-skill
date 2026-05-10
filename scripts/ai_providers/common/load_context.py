@@ -18,6 +18,8 @@ def _read_json(path: str) -> Dict[str, Any]:
 def _read_text_files(paths: List[str], max_total_chars: Optional[int]) -> str:
     parts: List[str] = []
     total = 0
+    if isinstance(max_total_chars, int) and max_total_chars <= 0:
+        max_total_chars = None
     for p in paths:
         if not p or not os.path.isfile(p):
             continue

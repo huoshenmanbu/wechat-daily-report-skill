@@ -81,7 +81,7 @@ Claude 将自动调用本项目中的脚本，从解密后的原始数据库读�
 - `analyze_timeout_seconds` / `report_timeout_seconds` / `provider_timeout_seconds`: 子进程与 Provider 超时（秒）
 - `provider`: `stub`（默认，离线占位）| `cursor_cli`（调用本机 Cursor CLI）| `dashscope` / `volc_ark`（预留，尚未实现）
 - `provider_config_file`: 可选，指向 JSON（见 `config/ai_providers.example.json`），按后端分区的参数（如 `cursor_cli.command`）
-- `max_chat_chars`: 可选，读取精简聊天文本时的总字符上限（默认 `80000`，Windows/macOS 行为一致）
+- `max_chat_chars`: 可选，读取精简聊天文本时的总字符上限（默认 `0` 表示不限制；建议按模型能力配置，如 `200000`）
 - `sender`: `none`（默认，不发送）| `feishu_cli_webhook`（首期可用）| `feishu_cli_card` / `feishu_im_api`（预留）
 - `sender_timeout_seconds` / `sender_retry_times` / `sender_retry_backoff_seconds`: 发送超时与重试参数
 - `sender_config_file`: 可选，指向 JSON（见 `config/senders.example.json`）
@@ -101,6 +101,18 @@ Claude 将自动调用本项目中的脚本，从解密后的原始数据库读�
 ```bash
 python scripts/schedule_report.py --config config/report_schedule.yaml
 ```
+
+若报告文件已存在但你希望**强制重跑同一窗口**（覆盖再生成），可加 `--force`：
+
+```bash
+python scripts/schedule_report.py --config config/report_schedule.yaml --start "2026-05-10 10:00:00" --end "2026-05-10 11:00:00" --force
+```
+
+`--force` 行为说明：
+
+- 仅影响“目标报告已存在时是否跳过”这一步
+- 不会修改 state 断点（手动窗口模式本就禁用 state 更新）
+- 适合你调整了 `ai_prompt.md`、渲染逻辑或 provider 配置后，对同一时间窗做回放验证
 
 仅查看本次将处理哪个窗口（不执行）：
 
