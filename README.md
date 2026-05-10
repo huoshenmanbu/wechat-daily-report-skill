@@ -108,6 +108,23 @@ python scripts/schedule_report.py --config config/report_schedule.yaml
 python scripts/schedule_report.py --config config/report_schedule.yaml --dry-run
 ```
 
+### 2.5) 常驻模式（单进程每小时自动执行）
+
+```bash
+python scripts/schedule_report.py --config config/report_schedule.yaml --daemon
+```
+
+可选参数：
+
+- `--poll-seconds 30`：等待下一次边界时的轮询间隔（最小 5 秒）
+- `--daemon-backoff-seconds 60`：单轮失败后的退避时间（最小 5 秒）
+
+说明：
+
+- 常驻模式按 `interval_minutes` 对齐网格触发，不会因单轮执行耗时造成长期漂移。
+- 若某轮执行超过 1 小时，下一轮会顺序补跑积压窗口（不并发）。
+- 与 `--dry-run` / `--start --end` 互斥。
+
 ### 3) 定时任务（Windows / macOS）
 
 **Windows**：任务计划程序创建任务，按间隔运行上面的 run-once；「起始于」填写仓库根目录，并把 `CURSOR_API_KEY` 等写入任务的环境变量（若使用 `cursor_cli`）。

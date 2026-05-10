@@ -39,6 +39,20 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run scheduled summary windows by config.")
     parser.add_argument("--config", default="config/report_schedule.yaml", help="Schedule config path")
     parser.add_argument("--dry-run", action="store_true", help="Only print the next computed window")
+    parser.add_argument("--force", action="store_true", help="Force regenerate even if report already exists")
+    parser.add_argument("--daemon", action="store_true", help="Keep process alive and run on aligned schedule")
+    parser.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=30,
+        help="Daemon sleep polling interval in seconds (min: 5, default: 30)",
+    )
+    parser.add_argument(
+        "--daemon-backoff-seconds",
+        type=int,
+        default=60,
+        help="Daemon retry backoff after failure in seconds (min: 5, default: 60)",
+    )
     parser.add_argument("--start", help="Manual window start, format: YYYY-MM-DD HH:MM:SS")
     parser.add_argument("--end", help="Manual window end, format: YYYY-MM-DD HH:MM:SS")
     return parser.parse_args()
@@ -131,7 +145,7 @@ def _load_config(path: str) -> Dict[str, Any]:
         "state_file": str(data.get("state_file", "runtime/state.json")).strip(),
         "python_executable": str(data.get("python_executable", sys.executable)).strip() or sys.executable,
         "provider_config_file": str(data.get("provider_config_file", "")).strip(),
-        "max_chat_chars": _parse_int_field(data, "max_chat_chars", 80000, minimum=100),
+        "max_chat_chars": _parse_int_field(data, "max_chat_chars", 0, minimum=0),
         "sender": str(data.get("sender", "none")).strip().lower(),
         "sender_timeout_seconds": _parse_int_field(data, "sender_timeout_seconds", 30, minimum=1),
         "sender_retry_times": _parse_int_field(data, "sender_retry_times", 1, minimum=0),
@@ -442,6 +456,7 @@ def process_one_window(
     end: dt.datetime,
     dry_run: bool,
     update_state: bool = True,
+    force: bool = False,
 ) -> int:
     paths = _build_paths(cfg, start, end)
 
@@ -451,7 +466,7 @@ def process_one_window(
     if dry_run:
         return 0
 
-    if os.path.exists(paths["report"]):
+    if os.path.exists(paths["report"]) and not force:
         print("[scheduler] report already exists, skip")
         if update_state:
             new_state = {
@@ -462,6 +477,8 @@ def process_one_window(
             }
             _atomic_write_json(cfg["state_file"], new_state)
         return 0
+    if os.path.exists(paths["report"]) and force:
+        print("[scheduler] report already exists, but --force enabled; regenerating")
 
     analyze_cmd = [
         cfg["python_executable"],
@@ -602,12 +619,13 @@ def run_scheduled(
     cfg: Dict[str, Any],
     dry_run: bool = False,
     manual_window: Optional[Tuple[dt.datetime, dt.datetime]] = None,
+    force: bool = False,
 ) -> int:
     """依次处理积压窗口，最多 max_catchup_windows 次。"""
     if manual_window is not None:
         start, end = manual_window
         print("[scheduler] manual window mode enabled (state disabled)")
-        return process_one_window(cfg, start, end, dry_run, update_state=False)
+        return process_one_window(cfg, start, end, dry_run, update_state=False, force=force)
 
     max_n = cfg["max_catchup_windows"]
     processed = 0
@@ -620,7 +638,7 @@ def run_scheduled(
                 print("[scheduler] no ready window yet")
             break
         start, end = window
-        code = process_one_window(cfg, start, end, dry_run)
+        code = process_one_window(cfg, start, end, dry_run, force=force)
         if dry_run:
             return code
         if code != 0:
@@ -634,8 +652,60 @@ def run_scheduled(
     return 0
 
 
+def _next_boundary(now: dt.datetime, interval_minutes: int) -> dt.datetime:
+    return _floor_to_interval(now, interval_minutes) + dt.timedelta(minutes=interval_minutes)
+
+
+def _sleep_until(
+    target: dt.datetime,
+    *,
+    poll_seconds: int,
+    heartbeat_seconds: int = 300,
+) -> None:
+    poll = max(5, int(poll_seconds))
+    next_heartbeat = dt.datetime.now() + dt.timedelta(seconds=heartbeat_seconds)
+    while True:
+        now = dt.datetime.now()
+        if now >= target:
+            return
+        if now >= next_heartbeat:
+            left = max(0, int((target - now).total_seconds()))
+            print(f"[daemon] waiting for next boundary, remaining={left}s")
+            next_heartbeat = now + dt.timedelta(seconds=heartbeat_seconds)
+        sleep_for = min(poll, max(1, int((target - now).total_seconds())))
+        time.sleep(sleep_for)
+
+
+def run_daemon(
+    cfg: Dict[str, Any],
+    *,
+    poll_seconds: int,
+    backoff_seconds: int,
+    force: bool,
+) -> int:
+    poll = max(5, int(poll_seconds))
+    backoff = max(5, int(backoff_seconds))
+    print(
+        "[daemon] started: "
+        f"interval_minutes={cfg['interval_minutes']} poll_seconds={poll} backoff_seconds={backoff}"
+    )
+    while True:
+        code = run_scheduled(cfg, dry_run=False, manual_window=None, force=force)
+        if code != 0:
+            print(f"[daemon] run failed with code={code}, backoff {backoff}s then continue")
+            time.sleep(backoff)
+            continue
+        next_at = _next_boundary(dt.datetime.now(), cfg["interval_minutes"])
+        print(f"[daemon] next wake at {_fmt_time(next_at)}")
+        _sleep_until(next_at, poll_seconds=poll)
+
+
 def main() -> None:
     args = parse_args()
+    if args.poll_seconds < 5:
+        raise SystemExit("`--poll-seconds` must be >= 5.")
+    if args.daemon_backoff_seconds < 5:
+        raise SystemExit("`--daemon-backoff-seconds` must be >= 5.")
     cfg = _load_config(args.config)
     manual_window: Optional[Tuple[dt.datetime, dt.datetime]] = None
     if bool(args.start) != bool(args.end):
@@ -646,11 +716,26 @@ def main() -> None:
         if end <= start:
             raise SystemExit("`--end` must be later than `--start`.")
         manual_window = (start, end)
+    if args.daemon and args.dry_run:
+        raise SystemExit("`--daemon` cannot be used with `--dry-run`.")
+    if args.daemon and manual_window is not None:
+        raise SystemExit("`--daemon` cannot be used with `--start/--end` manual window.")
 
     if not _acquire_lock(cfg["lock_file"], cfg["lock_ttl_seconds"]):
         raise SystemExit(0)
     try:
-        code = run_scheduled(cfg, args.dry_run, manual_window=manual_window)
+        if args.daemon:
+            code = run_daemon(
+                cfg,
+                poll_seconds=args.poll_seconds,
+                backoff_seconds=args.daemon_backoff_seconds,
+                force=args.force,
+            )
+        else:
+            code = run_scheduled(cfg, args.dry_run, manual_window=manual_window, force=args.force)
+    except KeyboardInterrupt:
+        print("[daemon] interrupted by user, exiting")
+        code = 0
     finally:
         _release_lock(cfg["lock_file"])
     raise SystemExit(code)
