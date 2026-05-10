@@ -12,3 +12,8 @@ build/
 env/
 venv/
 .gitnexus
+
+# Runtime/generated artifacts
+runtime/
+outputs/reports/
+.tmp/

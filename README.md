@@ -83,9 +83,9 @@ Claude 将自动调用本项目中的脚本，从解密后的原始数据库读�
 - `provider_config_file`: 可选，指向 JSON（见 `config/ai_providers.example.json`），按后端分区的参数（如 `cursor_cli.command`）
 - `max_chat_chars`: 可选，读取精简聊天文本时的总字符上限（默认 `80000`，Windows/macOS 行为一致）
 
-**Cursor CLI（`provider: cursor_cli`）**：需已安装 Cursor CLI，并将 `agent`（或 `["cursor","agent"]`）放在 `PATH`，或把完整命令前缀写在 `provider_config_file` 的 `cursor_cli.command` 数组中。调度进程需能访问 **`CURSOR_API_KEY`**（Windows 任务计划 / macOS launchd / cron 里配置环境变量）。非交互模式仍可能对工作区产生副作用，若介意请使用专用克隆目录或查阅 Cursor 文档中的 workspace/worktree 选项。
+**Cursor CLI（`provider: cursor_cli`）**：需已安装 Cursor CLI，并将 `agent`（或完整可执行文件路径）放在 `PATH`，或把完整命令前缀写在 `provider_config_file` 的 `cursor_cli.command` 数组中。**首次或非交互运行**时 CLI 会要求「信任工作区」：脚本已默认附加 `--trust`（可在 JSON 里设 `cursor_cli.trust_workspace: false` 关闭）。手动测试若出现 “Workspace Trust Required”，在命令中加上 `--trust` 即可。**Windows**：Python 直接以子进程调用 `agent --print` 时，部分 Cursor Agent 版本会出现退出码 0 但 stdout 为空；脚本会自动改用 PowerShell 包装 `agent`，并解析 Cursor CLI 的 `{"type":"result","result":"..."}` 输出 envelope。请不要设置 `cursor_cli.hide_window: true`（默认即为不隐藏）。如 agent 等待工具授权，可尝试 `cursor_cli.force: true`（自动允许命令，有风险）。非交互模式仍可能对工作区产生副作用，若介意请使用专用克隆目录或查阅 Cursor 文档中的 workspace/worktree 选项。
 
-配置里整数项若**写了空值或非数字**，启动时会得到**明确字段名**的错误提示（避免 `ValueError: invalid literal for int()` 难排查）。`analyze` / `generate_report` 为子进程超时；`provider_timeout_seconds` 用线程等待上限——超时后调度会继续（并写入兜底 `ai_content`），但 **Python 线程无法像子进程一样被强制杀掉**，stub 几乎瞬时无影响；接入真实 HTTP/模型调用时请在客户端再设超时或可中断逻辑。
+配置里整数项若**写了空值或非数字**，启动时会得到**明确字段名**的错误提示（避免 `ValueError: invalid literal for int()` 难排查）。`analyze` / `generate_report` 为子进程超时；`cursor_cli` 会把 `provider_timeout_seconds` 传给底层 `agent` 子进程，超时后直接失败并写入兜底 `ai_content`。其他非子进程 provider 仍使用线程等待上限；接入真实 HTTP/模型调用时请在客户端再设超时或可中断逻辑。
 
 任务计划请将「起始于」设为 **本仓库根目录**，脚本内部亦会以仓库根为子进程 `cwd`；若锁被占用会**直接退出 0** 避免异常栈。
 

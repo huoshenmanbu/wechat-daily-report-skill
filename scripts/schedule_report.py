@@ -8,6 +8,7 @@ schedule_report.py - 周期总结调度器（run-once）
 """
 
 import argparse
+import copy
 import datetime as dt
 import json
 import os
@@ -32,6 +33,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run scheduled summary windows by config.")
     parser.add_argument("--config", default="config/report_schedule.yaml", help="Schedule config path")
     parser.add_argument("--dry-run", action="store_true", help="Only print the next computed window")
+    parser.add_argument("--start", help="Manual window start, format: YYYY-MM-DD HH:MM:SS")
+    parser.add_argument("--end", help="Manual window end, format: YYYY-MM-DD HH:MM:SS")
     return parser.parse_args()
 
 
@@ -202,6 +205,13 @@ def _fmt_time(d: dt.datetime) -> str:
     return d.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _parse_cli_window_time(value: str, name: str) -> dt.datetime:
+    try:
+        return dt.datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except ValueError as e:
+        raise ValueError(f"`{name}` must be in format YYYY-MM-DD HH:MM:SS, got {value!r}.") from e
+
+
 def _floor_to_interval(now: dt.datetime, minutes: int) -> dt.datetime:
     total_minutes = now.hour * 60 + now.minute
     floored = (total_minutes // minutes) * minutes
@@ -318,15 +328,25 @@ def _run_provider_with_timeout(
     timeout = max(cfg["provider_timeout_seconds"], 1)
 
     def _call():
+        provider_options = copy.deepcopy(cfg.get("provider_options") or {})
+        if cfg["provider"] == "cursor_cli":
+            cursor_opts = provider_options.setdefault("cursor_cli", {})
+            if isinstance(cursor_opts, dict):
+                cursor_opts.setdefault("timeout_seconds", timeout)
+
         generate_ai_content(
             cfg["provider"],
             stats_path,
             ai_path,
             text_path=text_path,
-            provider_options=cfg.get("provider_options"),
+            provider_options=provider_options,
             max_chat_chars=cfg.get("max_chat_chars"),
             repo_root=str(REPO_ROOT),
         )
+
+    if cfg["provider"] == "cursor_cli":
+        _call()
+        return
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         fut = pool.submit(_call)
@@ -336,7 +356,13 @@ def _run_provider_with_timeout(
             raise TimeoutError(f"provider exceeded {timeout}s") from None
 
 
-def process_one_window(cfg: Dict[str, Any], start: dt.datetime, end: dt.datetime, dry_run: bool) -> int:
+def process_one_window(
+    cfg: Dict[str, Any],
+    start: dt.datetime,
+    end: dt.datetime,
+    dry_run: bool,
+    update_state: bool = True,
+) -> int:
     paths = _build_paths(cfg, start, end)
 
     print(f"[scheduler] window: {_fmt_time(start)} -> {_fmt_time(end)}")
@@ -347,13 +373,14 @@ def process_one_window(cfg: Dict[str, Any], start: dt.datetime, end: dt.datetime
 
     if os.path.exists(paths["report"]):
         print("[scheduler] report already exists, skip")
-        new_state = {
-            "last_end": end.isoformat(),
-            "last_success_job_id": paths["window_id"],
-            "last_run_at": dt.datetime.now().isoformat(),
-            "last_result": "skipped_existing",
-        }
-        _atomic_write_json(cfg["state_file"], new_state)
+        if update_state:
+            new_state = {
+                "last_end": end.isoformat(),
+                "last_success_job_id": paths["window_id"],
+                "last_run_at": dt.datetime.now().isoformat(),
+                "last_result": "skipped_existing",
+            }
+            _atomic_write_json(cfg["state_file"], new_state)
         return 0
 
     analyze_cmd = [
@@ -395,13 +422,14 @@ def process_one_window(cfg: Dict[str, Any], start: dt.datetime, end: dt.datetime
 
     if total_count == 0:
         print("[scheduler] empty window, skip report generation")
-        new_state = {
-            "last_end": end.isoformat(),
-            "last_success_job_id": paths["window_id"],
-            "last_run_at": dt.datetime.now().isoformat(),
-            "last_result": "skip_with_log",
-        }
-        _atomic_write_json(cfg["state_file"], new_state)
+        if update_state:
+            new_state = {
+                "last_end": end.isoformat(),
+                "last_success_job_id": paths["window_id"],
+                "last_run_at": dt.datetime.now().isoformat(),
+                "last_result": "skip_with_log",
+            }
+            _atomic_write_json(cfg["state_file"], new_state)
         return 0
 
     if total_count < cfg["min_messages"]:
@@ -433,19 +461,29 @@ def process_one_window(cfg: Dict[str, Any], start: dt.datetime, end: dt.datetime
         print(ret.stderr)
         return 3
 
-    new_state = {
-        "last_end": end.isoformat(),
-        "last_success_job_id": paths["window_id"],
-        "last_run_at": dt.datetime.now().isoformat(),
-        "last_result": "ok",
-    }
-    _atomic_write_json(cfg["state_file"], new_state)
+    if update_state:
+        new_state = {
+            "last_end": end.isoformat(),
+            "last_success_job_id": paths["window_id"],
+            "last_run_at": dt.datetime.now().isoformat(),
+            "last_result": "ok",
+        }
+        _atomic_write_json(cfg["state_file"], new_state)
     print("[scheduler] window done")
     return 0
 
 
-def run_scheduled(cfg: Dict[str, Any], dry_run: bool = False) -> int:
+def run_scheduled(
+    cfg: Dict[str, Any],
+    dry_run: bool = False,
+    manual_window: Optional[Tuple[dt.datetime, dt.datetime]] = None,
+) -> int:
     """依次处理积压窗口，最多 max_catchup_windows 次。"""
+    if manual_window is not None:
+        start, end = manual_window
+        print("[scheduler] manual window mode enabled (state disabled)")
+        return process_one_window(cfg, start, end, dry_run, update_state=False)
+
     max_n = cfg["max_catchup_windows"]
     processed = 0
 
@@ -474,10 +512,20 @@ def run_scheduled(cfg: Dict[str, Any], dry_run: bool = False) -> int:
 def main() -> None:
     args = parse_args()
     cfg = _load_config(args.config)
+    manual_window: Optional[Tuple[dt.datetime, dt.datetime]] = None
+    if bool(args.start) != bool(args.end):
+        raise SystemExit("`--start` and `--end` must be provided together.")
+    if args.start and args.end:
+        start = _parse_cli_window_time(args.start, "start")
+        end = _parse_cli_window_time(args.end, "end")
+        if end <= start:
+            raise SystemExit("`--end` must be later than `--start`.")
+        manual_window = (start, end)
+
     if not _acquire_lock(cfg["lock_file"], cfg["lock_ttl_seconds"]):
         raise SystemExit(0)
     try:
-        code = run_scheduled(cfg, args.dry_run)
+        code = run_scheduled(cfg, args.dry_run, manual_window=manual_window)
     finally:
         _release_lock(cfg["lock_file"])
     raise SystemExit(code)

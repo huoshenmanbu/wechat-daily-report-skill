@@ -151,7 +151,79 @@ def _fmt_list(items, fallback="无"):
     return "、".join(values) if values else fallback
 
 
-def build_text_report(stats, ai_content):
+def _ai_narrative_empty(ai_content):
+    """无讨论热点/问答/对话等模型产出时视为「叙事为空」（含 ai_content 为 {}）。"""
+    if not ai_content:
+        return True
+    return not any(
+        ai_content.get(k)
+        for k in ("topics", "qas", "dialogues", "important_messages", "resources", "topic_heat")
+    )
+
+
+def _resolve_raw_text_path(stats_json_path: str, rel: str):
+    """raw_text_paths 多为相对仓库根或与 stats 同目录；返回首个存在的文件路径。"""
+    if not rel:
+        return None
+    rel = rel.replace("\\", os.sep)
+    tried = []
+    stats_dir = os.path.dirname(os.path.abspath(stats_json_path))
+    repo_root = os.path.normpath(os.path.join(stats_dir, "..", ".."))
+    candidates = []
+    if os.path.isabs(rel):
+        candidates.append(os.path.normpath(rel))
+    candidates.append(os.path.normpath(os.path.join(stats_dir, os.path.basename(rel))))
+    candidates.append(os.path.normpath(os.path.join(stats_dir, rel)))
+    candidates.append(os.path.normpath(os.path.join(repo_root, rel)))
+    candidates.append(os.path.normpath(os.path.join(os.getcwd(), rel)))
+    for c in candidates:
+        if c in tried:
+            continue
+        tried.append(c)
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def _read_simplified_excerpt(stats, stats_json_path: str, *, max_lines: int = 120, max_chars: int = 16000):
+    paths = stats.get("raw_text_paths") or []
+    if not paths:
+        legacy = stats.get("raw_text_path")
+        if legacy:
+            paths = [legacy]
+    text_path = None
+    for p in paths:
+        text_path = _resolve_raw_text_path(stats_json_path, p)
+        if text_path:
+            break
+    if not text_path:
+        return ""
+    try:
+        with open(text_path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return ""
+    out_lines = []
+    i = 0
+    if lines and lines[0].strip().startswith("==="):
+        i = 1
+    char_budget = max_chars
+    while i < len(lines) and len(out_lines) < max_lines:
+        line = lines[i].rstrip()
+        i += 1
+        if not line:
+            out_lines.append("")
+            continue
+        if len(line) > char_budget:
+            line = line[:char_budget] + "…"
+            out_lines.append(line)
+            break
+        char_budget -= len(line) + 1
+        out_lines.append(line)
+    return "\n".join(out_lines).strip()
+
+
+def build_text_report(stats, ai_content, stats_json_path: str = ""):
     meta = stats.get("meta", {})
     lines = []
     lines.append(f"# {meta.get('name', '群聊')} 总结")
@@ -175,6 +247,22 @@ def build_text_report(stats, ai_content):
                 line += f"；特点：{_fmt_list(traits)}"
             lines.append(line)
         lines.append("")
+
+    if _ai_narrative_empty(ai_content) and stats_json_path:
+        excerpt = _read_simplified_excerpt(stats, stats_json_path)
+        if excerpt:
+            lines.append("## 群聊原文摘录（节选）")
+            lines.append("")
+            lines.append("> 本段来自 `analyze_chat` 导出的压缩原文，**不是**模型摘要。")
+            lines.append(
+                "> 若已配置 AI provider（如 `cursor_cli`）并成功生成 `ai_content`，"
+                "将优先展示「讨论热点」等章节。"
+            )
+            lines.append("")
+            lines.append("```text")
+            lines.append(excerpt)
+            lines.append("```")
+            lines.append("")
 
     topics = ai_content.get("topics", [])
     if topics:
@@ -318,7 +406,7 @@ def main():
         )
 
     if output_ext in ['.txt', '.md', '']:
-        text_output = build_text_report(stats, ai_content)
+        text_output = build_text_report(stats, ai_content, stats_json_path=args.stats)
         with open(args.output, 'w', encoding='utf-8') as f:
             f.write(text_output)
         print(f"Text report generated: {args.output}")

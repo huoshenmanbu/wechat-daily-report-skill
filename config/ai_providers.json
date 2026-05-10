@@ -1,11 +1,6 @@
 {
   "cursor_cli": {
-    "command": ["agent"],
-    "trust_workspace": true,
-    "hide_window": false,
-    "force": false,
-    "retry_on_empty_stdout": false,
-    "cmdline_char_limit": 28000
+    "command": ["agent"]
   },
   "dashscope": {
     "api_key_env": "DASHSCOPE_API_KEY",

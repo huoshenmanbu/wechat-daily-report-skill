@@ -173,8 +173,18 @@ def analyze(args):
     # Basic Stats
     total_messages = len(messages)
     
-    # Filter text messages (type 0: 纯文本, type 2: 语音转文字)
+    # Filter text messages (type 0: 纯文本, type 2: 语音转文字) — 用于词云、常用词等 NLP
     text_messages = [m for m in messages if m['type'] in (0, 2)]
+
+    # simplified_chat 导出：包含图片/表情/语音占位等非纯文本，避免「有话唠统计但没有正文行」
+    def _has_exportable_content(msg):
+        c = msg.get("content") or ""
+        if c.startswith("[语音转文字] "):
+            c = c[7:]
+        c = c.replace("\r", "").replace("\n", " ").strip()
+        return bool(c)
+
+    export_messages = [m for m in messages if _has_exportable_content(m)]
     
     # Active Users (优先使用 groupNickname)
     active_users = set(get_display_name(m) for m in messages)
@@ -295,7 +305,7 @@ def analyze(args):
     current_group = []
     window_start_ts = None
 
-    for m in text_messages:
+    for m in export_messages:
         ts = m['timestamp']
         if window_start_ts is None:
             window_start_ts = ts
