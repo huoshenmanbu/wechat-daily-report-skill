@@ -82,8 +82,15 @@ Claude 将自动调用本项目中的脚本，从解密后的原始数据库读�
 - `provider`: `stub`（默认，离线占位）| `cursor_cli`（调用本机 Cursor CLI）| `dashscope` / `volc_ark`（预留，尚未实现）
 - `provider_config_file`: 可选，指向 JSON（见 `config/ai_providers.example.json`），按后端分区的参数（如 `cursor_cli.command`）
 - `max_chat_chars`: 可选，读取精简聊天文本时的总字符上限（默认 `80000`，Windows/macOS 行为一致）
+- `sender`: `none`（默认，不发送）| `feishu_cli_webhook`（首期可用）| `feishu_cli_card` / `feishu_im_api`（预留）
+- `sender_timeout_seconds` / `sender_retry_times` / `sender_retry_backoff_seconds`: 发送超时与重试参数
+- `sender_config_file`: 可选，指向 JSON（见 `config/senders.example.json`）
+- `feishu_message_max_chars`: 发飞书正文截断阈值（默认 `3000`）
+- `sender_strict`: 发送失败是否让任务失败退出（默认 `false`）
 
 **Cursor CLI（`provider: cursor_cli`）**：需已安装 Cursor CLI，并将 `agent`（或完整可执行文件路径）放在 `PATH`，或把完整命令前缀写在 `provider_config_file` 的 `cursor_cli.command` 数组中。**首次或非交互运行**时 CLI 会要求「信任工作区」：脚本已默认附加 `--trust`（可在 JSON 里设 `cursor_cli.trust_workspace: false` 关闭）。手动测试若出现 “Workspace Trust Required”，在命令中加上 `--trust` 即可。**Windows**：Python 直接以子进程调用 `agent --print` 时，部分 Cursor Agent 版本会出现退出码 0 但 stdout 为空；脚本会自动改用 PowerShell 包装 `agent`，并解析 Cursor CLI 的 `{"type":"result","result":"..."}` 输出 envelope。请不要设置 `cursor_cli.hide_window: true`（默认即为不隐藏）。如 agent 等待工具授权，可尝试 `cursor_cli.force: true`（自动允许命令，有风险）。非交互模式仍可能对工作区产生副作用，若介意请使用专用克隆目录或查阅 Cursor 文档中的 workspace/worktree 选项。
+
+**飞书 CLI 发送（`sender: feishu_cli_webhook`）**：需准备 `feishu-cli` 命令，并在环境变量中配置 `FEISHU_WEBHOOK_URL`（可选 `FEISHU_WEBHOOK_SECRET`）。配置 `sender_config_file: config/senders.example.json` 后，任务会在成功生成 `report_*.md` 后自动发出摘要。默认发送失败不影响日报主流程；若希望发送失败时任务整体失败，设 `sender_strict: true`。
 
 配置里整数项若**写了空值或非数字**，启动时会得到**明确字段名**的错误提示（避免 `ValueError: invalid literal for int()` 难排查）。`analyze` / `generate_report` 为子进程超时；`cursor_cli` 会把 `provider_timeout_seconds` 传给底层 `agent` 子进程，超时后直接失败并写入兜底 `ai_content`。其他非子进程 provider 仍使用线程等待上限；接入真实 HTTP/模型调用时请在客户端再设超时或可中断逻辑。
 

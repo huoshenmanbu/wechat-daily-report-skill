@@ -23,6 +23,15 @@ provider_timeout_seconds: 90
 analyze_timeout_seconds: 600
 report_timeout_seconds: 300
 
+# 发送通道（none | feishu_cli_webhook | feishu_cli_card | feishu_im_api）
+sender: none
+sender_timeout_seconds: 30
+sender_retry_times: 1
+sender_retry_backoff_seconds: 2
+sender_strict: false
+sender_config_file:
+feishu_message_max_chars: 3000
+
 lock_file: runtime/schedule_report.lock
 lock_ttl_seconds: 600
 state_file: runtime/state.json

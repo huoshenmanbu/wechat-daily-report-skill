@@ -24,6 +24,12 @@ try:
     from scripts.ai_provider import generate_ai_content
 except ModuleNotFoundError:
     from ai_provider import generate_ai_content
+try:
+    from scripts.report_senders.common.payload import build_text_payload
+    from scripts.report_senders.registry import send_report_with_retry
+except ModuleNotFoundError:
+    from report_senders.common.payload import build_text_payload
+    from report_senders.registry import send_report_with_retry
 
 # 仓库根目录（用于子进程 cwd，避免任务计划工作目录非仓库根时失败）
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -126,6 +132,13 @@ def _load_config(path: str) -> Dict[str, Any]:
         "python_executable": str(data.get("python_executable", sys.executable)).strip() or sys.executable,
         "provider_config_file": str(data.get("provider_config_file", "")).strip(),
         "max_chat_chars": _parse_int_field(data, "max_chat_chars", 80000, minimum=100),
+        "sender": str(data.get("sender", "none")).strip().lower(),
+        "sender_timeout_seconds": _parse_int_field(data, "sender_timeout_seconds", 30, minimum=1),
+        "sender_retry_times": _parse_int_field(data, "sender_retry_times", 1, minimum=0),
+        "sender_retry_backoff_seconds": _parse_int_field(data, "sender_retry_backoff_seconds", 2, minimum=0),
+        "sender_strict": _parse_bool(data.get("sender_strict", False), False),
+        "sender_config_file": str(data.get("sender_config_file", "")).strip(),
+        "feishu_message_max_chars": _parse_int_field(data, "feishu_message_max_chars", 3000, minimum=200),
     }
     if not cfg["chatroom"]:
         raise ValueError("Config `chatroom` is required.")
@@ -137,6 +150,11 @@ def _load_config(path: str) -> Dict[str, Any]:
     if cfg["provider"] not in _providers_allowed:
         raise ValueError(
             f"Config `provider` must be one of {sorted(_providers_allowed)}, got {cfg['provider']!r}."
+        )
+    _senders_allowed = {"none", "feishu_cli_webhook", "feishu_cli_card", "feishu_im_api"}
+    if cfg["sender"] not in _senders_allowed:
+        raise ValueError(
+            f"Config `sender` must be one of {sorted(_senders_allowed)}, got {cfg['sender']!r}."
         )
 
     pcf = cfg["provider_config_file"]
@@ -150,6 +168,18 @@ def _load_config(path: str) -> Dict[str, Any]:
             cfg["provider_options"] = json.load(f)
     else:
         cfg["provider_options"] = {}
+
+    scf = cfg["sender_config_file"]
+    if scf:
+        pth = Path(scf)
+        if not pth.is_absolute():
+            pth = REPO_ROOT / pth
+        if not pth.is_file():
+            raise FileNotFoundError(f"sender_config_file not found: {pth}")
+        with open(pth, "r", encoding="utf-8") as f:
+            cfg["sender_options"] = json.load(f)
+    else:
+        cfg["sender_options"] = {}
 
     return cfg
 
@@ -166,10 +196,27 @@ def _load_flat_yaml(path: str) -> Dict[str, Any]:
                 continue
             key, value = line.split(":", 1)
             k = key.strip()
-            v = value.strip().strip("'").strip('"')
+            v = _strip_inline_comment(value).strip().strip("'").strip('"')
             if k:
                 result[k] = v
     return result
+
+
+def _strip_inline_comment(value: str) -> str:
+    """Strip trailing inline comments (outside quotes), preserving Windows paths."""
+    s = value.rstrip()
+    in_single = False
+    in_double = False
+    for i, ch in enumerate(s):
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            continue
+        if ch == "#" and not in_single and not in_double:
+            return s[:i]
+    return s
 
 
 def _load_state(path: str) -> Dict[str, Any]:
@@ -356,6 +403,39 @@ def _run_provider_with_timeout(
             raise TimeoutError(f"provider exceeded {timeout}s") from None
 
 
+def _run_sender_with_timeout(
+    cfg: Dict[str, Any],
+    *,
+    report_path: str,
+    window_id: str,
+) -> Dict[str, Any]:
+    sender = cfg.get("sender", "none")
+    if sender == "none":
+        return {
+            "ok": True,
+            "provider": "none",
+            "message_id": None,
+            "error_code": None,
+            "error": None,
+            "attempts": 0,
+        }
+
+    payload = build_text_payload(
+        report_path,
+        chatroom=cfg.get("chatroom", ""),
+        window_id=window_id,
+        max_chars=cfg.get("feishu_message_max_chars", 3000),
+    )
+    return send_report_with_retry(
+        sender,
+        payload,
+        cfg.get("sender_options") or {},
+        timeout_seconds=cfg.get("sender_timeout_seconds", 30),
+        retry_times=cfg.get("sender_retry_times", 1),
+        retry_backoff_seconds=cfg.get("sender_retry_backoff_seconds", 2),
+    )
+
+
 def process_one_window(
     cfg: Dict[str, Any],
     start: dt.datetime,
@@ -461,14 +541,59 @@ def process_one_window(
         print(ret.stderr)
         return 3
 
+    sender_result = {
+        "ok": True,
+        "provider": "none",
+        "message_id": None,
+        "error_code": None,
+        "error": None,
+        "attempts": 0,
+    }
+    try:
+        sender_result = _run_sender_with_timeout(
+            cfg,
+            report_path=paths["report"],
+            window_id=paths["window_id"],
+        )
+    except Exception as e:
+        sender_result = {
+            "ok": False,
+            "provider": cfg.get("sender", "none"),
+            "message_id": None,
+            "error_code": type(e).__name__,
+            "error": str(e),
+            "attempts": 1,
+        }
+    if not sender_result.get("ok"):
+        print(
+            "[sender] failed: "
+            f"provider={sender_result.get('provider')} "
+            f"code={sender_result.get('error_code')} "
+            f"error={sender_result.get('error')}"
+        )
+        strict_sender_fail = bool(cfg.get("sender_strict", False))
+    else:
+        print(
+            "[sender] ok: "
+            f"provider={sender_result.get('provider')} "
+            f"message_id={sender_result.get('message_id')}"
+        )
+        strict_sender_fail = False
+
     if update_state:
         new_state = {
             "last_end": end.isoformat(),
             "last_success_job_id": paths["window_id"],
             "last_run_at": dt.datetime.now().isoformat(),
             "last_result": "ok",
+            "last_sender_result": "ok" if sender_result.get("ok") else "error",
+            "last_sender_provider": sender_result.get("provider"),
+            "last_sender_error": sender_result.get("error"),
+            "last_sender_at": dt.datetime.now().isoformat(),
         }
         _atomic_write_json(cfg["state_file"], new_state)
+    if strict_sender_fail:
+        return 4
     print("[scheduler] window done")
     return 0
 
