@@ -5,7 +5,11 @@
     "hide_window": false,
     "force": false,
     "retry_on_empty_stdout": false,
-    "cmdline_char_limit": 28000
+    "cmdline_char_limit": 28000,
+    "reuse_session": false,
+    "session_state_path": "runtime/cursor_cli_session.json",
+    "resume_style": "explicit_id",
+    "on_resume_failure": "clear_and_retry_fresh"
   },
   "dashscope": {
     "api_key_env": "DASHSCOPE_API_KEY",

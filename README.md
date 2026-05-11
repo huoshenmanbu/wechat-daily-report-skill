@@ -90,6 +90,10 @@ Claude 将自动调用本项目中的脚本，从解密后的原始数据库读�
 
 **Cursor CLI（`provider: cursor_cli`）**：需已安装 Cursor CLI，并将 `agent`（或完整可执行文件路径）放在 `PATH`，或把完整命令前缀写在 `provider_config_file` 的 `cursor_cli.command` 数组中。**首次或非交互运行**时 CLI 会要求「信任工作区」：脚本已默认附加 `--trust`（可在 JSON 里设 `cursor_cli.trust_workspace: false` 关闭）。手动测试若出现 “Workspace Trust Required”，在命令中加上 `--trust` 即可。**Windows**：Python 直接以子进程调用 `agent --print` 时，部分 Cursor Agent 版本会出现退出码 0 但 stdout 为空；脚本会自动改用 PowerShell 包装 `agent`，并解析 Cursor CLI 的 `{"type":"result","result":"..."}` 输出 envelope。请不要设置 `cursor_cli.hide_window: true`（默认即为不隐藏）。如 agent 等待工具授权，可尝试 `cursor_cli.force: true`（自动允许命令，有风险）。非交互模式仍可能对工作区产生副作用，若介意请使用专用克隆目录或查阅 Cursor 文档中的 workspace/worktree 选项。
 
+**可选：固定会话续聊（`cursor_cli.reuse_session`）**：默认 `false`，每次调度仍为新的 `agent -p` 调用。设为 `true` 时，会在仓库根下（默认 `runtime/cursor_cli_session.json`，已在 `.gitignore`）读写 `chat_id`：若文件中有 id，则附加 `--resume <id>`；若 CLI 返回的 JSON envelope 中含 `sessionId` / `chatId` / `conversationId` / `threadId` 之一，会自动写回文件。`resume_style`：`explicit_id`（默认，依赖上述 id）或 `continue`（附加 `--continue`，需本机 CLI 支持且行为以官方文档为准）。`on_resume_failure`：`clear_and_retry_fresh`（默认，带 resume 时若 agent 非零退出则清空状态并无 resume 再跑一轮）、`raise`（不重试）、`clear_only`（清空状态后仍按原错误失败）。自动化场景下 resume 行为以 Cursor 版本为准；额度仍主要取决于每次请求的上下文与输出 token。重置会话：删除 `runtime/cursor_cli_session.json` 或关掉 `reuse_session`。
+
+**安全与路径**：相对路径 `session_state_path` 会解析在 `repo_root` 之下，禁止 `..` 逃出仓库；`chat_id` 仅接受长度 ≤256 的 ASCII 子集（字母数字与 `._:-`），含空格或其它字符的 id 会被忽略不写盘，以免破坏 argv/PowerShell。若真实 id 含其它符号，请改用官方支持的字符集或等 Cursor CLI 回传可解析字段。
+
 **飞书 CLI 发送（`sender: feishu_cli_webhook`）**：需准备 `feishu-cli` 命令，并在环境变量中配置 `FEISHU_WEBHOOK_URL`（可选 `FEISHU_WEBHOOK_SECRET`）。配置 `sender_config_file: config/senders.example.json` 后，任务会在成功生成 `report_*.md` 后自动发出摘要。默认发送失败不影响日报主流程；若希望发送失败时任务整体失败，设 `sender_strict: true`。
 
 配置里整数项若**写了空值或非数字**，启动时会得到**明确字段名**的错误提示（避免 `ValueError: invalid literal for int()` 难排查）。`analyze` / `generate_report` 为子进程超时；`cursor_cli` 会把 `provider_timeout_seconds` 传给底层 `agent` 子进程，超时后直接失败并写入兜底 `ai_content`。其他非子进程 provider 仍使用线程等待上限；接入真实 HTTP/模型调用时请在客户端再设超时或可中断逻辑。

@@ -8,9 +8,16 @@ import os
 import subprocess
 import sys
 import tempfile
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ai_providers.common.json_extract import extract_first_json_object
+from ai_providers.cursor_cli_session import (
+    clear_session,
+    load_session_chat_id,
+    normalize_on_resume_failure,
+    sanitize_chat_id,
+    save_session_chat_id,
+)
 
 
 # Conservative limit for Windows CreateProcess command-line (~8191); leave margin for flags.
@@ -79,6 +86,20 @@ def _deep_find_digest_dict(obj: Any) -> Optional[Dict[str, Any]]:
     return best if best is not None and best_score >= 7 else None
 
 
+def _parse_cursor_result_envelope(text: str) -> Optional[Dict[str, Any]]:
+    """If ``text`` is a Cursor CLI ``{"type":"result",...}`` JSON object, return it; else None."""
+    stripped = text.strip()
+    if not stripped:
+        return None
+    try:
+        outer = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(outer, dict) or outer.get("type") != "result":
+        return None
+    return outer
+
+
 def _unwrap_cursor_envelope(text: str) -> str:
     """Extract inner model output from the Cursor CLI result envelope.
 
@@ -88,19 +109,27 @@ def _unwrap_cursor_envelope(text: str) -> str:
     The inner ``result`` value is a plain string (the model's reply). It may itself
     contain a JSON object that we want to parse as ai_content.
     """
-    stripped = text.strip()
-    try:
-        outer = json.loads(stripped)
-    except json.JSONDecodeError:
-        return text
-    if not isinstance(outer, dict):
-        return text
-    if outer.get("type") != "result":
+    outer = _parse_cursor_result_envelope(text)
+    if outer is None:
         return text
     inner = outer.get("result", "")
     if isinstance(inner, str) and inner.strip():
         return inner
     return text
+
+
+def extract_chat_id_from_cli_stdout(stdout: str) -> Optional[str]:
+    """Best-effort: read session/chat id from Cursor CLI JSON envelope (if present)."""
+    outer = _parse_cursor_result_envelope(stdout)
+    if outer is None:
+        return None
+    for key in ("sessionId", "chatId", "conversationId", "threadId"):
+        val = outer.get(key)
+        if isinstance(val, str):
+            sid = sanitize_chat_id(val)
+            if sid:
+                return sid
+    return None
 
 
 def parse_cli_stdout_to_ai_dict(stdout: str) -> Dict[str, Any]:
@@ -136,6 +165,56 @@ def parse_cli_stdout_to_ai_dict(stdout: str) -> Dict[str, Any]:
 
 def _estimate_cmdline_chars(argv: list) -> int:
     return sum(len(str(a)) for a in argv) + len(argv)
+
+
+def _build_core_argv(cmd_prefix: List[str], repo_root: str, opts: Dict[str, Any]) -> List[str]:
+    base: List[str] = (
+        list(cmd_prefix)
+        + [
+            "-p",
+            "--print",
+            "--output-format",
+            "json",
+            "--mode=ask",
+            "--workspace",
+            repo_root,
+        ]
+    )
+    if opts.get("trust_workspace", True):
+        base.append("--trust")
+    if opts.get("force", False):
+        base.append("--force")
+    return base
+
+
+def _resume_argv(opts: Dict[str, Any], chat_id: Optional[str]) -> List[str]:
+    if not opts.get("reuse_session"):
+        return []
+    style = str(opts.get("resume_style") or "explicit_id").strip().lower()
+    if style == "continue":
+        return ["--continue"]
+    if style not in ("explicit_id", ""):
+        print(
+            f"[cursor_cli] unknown resume_style={style!r}, falling back to explicit_id",
+            file=sys.stderr,
+        )
+    sid = sanitize_chat_id(chat_id) if chat_id else None
+    if sid:
+        return ["--resume", sid]
+    return []
+
+
+def _maybe_save_chat_id_from_stdout(
+    stdout: str,
+    repo_root: str,
+    opts: Dict[str, Any],
+    reuse_enabled: bool,
+) -> None:
+    if not reuse_enabled:
+        return
+    extracted = extract_chat_id_from_cli_stdout(stdout)
+    if extracted:
+        save_session_chat_id(repo_root, opts, extracted)
 
 
 def _ps_quote(value: str) -> str:
@@ -225,7 +304,8 @@ def run_cursor_cli(
     repo_root: str,
     provider_options: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    opts = (provider_options or {}).get("cursor_cli") or {}
+    _raw_opts = (provider_options or {}).get("cursor_cli")
+    opts = _raw_opts if isinstance(_raw_opts, dict) else {}
     cmd_prefix = opts.get("command")
     if not cmd_prefix:
         cmd_prefix = ["agent"]
@@ -233,24 +313,13 @@ def run_cursor_cli(
     if not isinstance(cmd_prefix, list) or not cmd_prefix:
         raise ValueError("cursor_cli.command must be a non-empty JSON array of strings")
 
-    base = (
-        list(cmd_prefix)
-        + [
-            "-p",
-            "--print",
-            "--output-format",
-            "json",
-            "--mode=ask",
-            "--workspace",
-            repo_root,
-        ]
-    )
-    # 非交互 / 任务计划无真人点「信任」；与手动加 --trust 等价。设 cursor_cli.trust_workspace=false 可关闭。
-    if opts.get("trust_workspace", True):
-        base.append("--trust")
-    # 无界面运行时若 agent 等待工具授权，可设 cursor_cli.force: true（等价 --force，请自行评估风险）
-    if opts.get("force", False):
-        base.append("--force")
+    reuse_enabled = bool(opts.get("reuse_session"))
+    chat_id: Optional[str] = load_session_chat_id(repo_root, opts) if reuse_enabled else None
+    core = _build_core_argv(cmd_prefix, repo_root, opts)
+    resume_part = _resume_argv(opts, chat_id)
+    base = core + resume_part
+    used_resume_argv = len(resume_part) > 0
+    on_resume_fail = normalize_on_resume_failure(opts)
 
     original_len = len(prompt)
     p = prompt
@@ -284,13 +353,38 @@ def run_cursor_cli(
     if timeout_seconds is not None:
         timeout = max(float(timeout_seconds), 1.0)
 
+    def _invoke(active_base: List[str], pr: str) -> Tuple[int, str, str]:
+        return _run_agent_once(active_base, pr, repo_root, timeout, creation_flags)
+
+    active_base = base
+
     try:
-        returncode, out, err = _run_agent_once(base, p, repo_root, timeout, creation_flags)
+        returncode, out, err = _invoke(active_base, p)
     except subprocess.TimeoutExpired as e:
         partial_out = (e.stdout or "") if isinstance(e.stdout, str) else ""
         partial_err = (e.stderr or "") if isinstance(e.stderr, str) else ""
         detail = (partial_err[-800:] or partial_out[:300] or "no partial output").strip()
         raise TimeoutError(f"cursor_cli exceeded {timeout}s: {detail!r}") from None
+
+    if returncode != 0 and used_resume_argv:
+        if on_resume_fail == "clear_and_retry_fresh":
+            print(
+                "[cursor_cli] agent exited non-zero with resume; clearing session and retrying once",
+                file=sys.stderr,
+            )
+            clear_session(repo_root, opts)
+            active_base = core
+            used_resume_argv = False
+            try:
+                returncode, out, err = _invoke(active_base, p)
+            except subprocess.TimeoutExpired as e:
+                partial_out = (e.stdout or "") if isinstance(e.stdout, str) else ""
+                partial_err = (e.stderr or "") if isinstance(e.stderr, str) else ""
+                detail = (partial_err[-800:] or partial_out[:300] or "no partial output").strip()
+                raise TimeoutError(f"cursor_cli exceeded {timeout}s: {detail!r}") from None
+        elif on_resume_fail == "clear_only":
+            clear_session(repo_root, opts)
+
     if err.strip():
         print(err, file=sys.stderr)
     if returncode != 0:
@@ -300,7 +394,7 @@ def run_cursor_cli(
         raise RuntimeError(f"cursor_cli exited with code {returncode}: {detail!r}")
 
     if not out.strip():
-        # 第一次为空时，用更短的 prompt 重试一次
+        # 第一次为空时，用更短的 prompt 重试一次（不改变 resume/session 策略）
         if opts.get("retry_on_empty_stdout", False):
             retry_len = int(opts.get("empty_stdout_retry_prompt_chars", 1800) or 1800)
             retry_len = max(600, min(retry_len, 4000))
@@ -312,7 +406,7 @@ def run_cursor_cli(
                     file=sys.stderr,
                 )
             try:
-                rc2, out2, err2 = _run_agent_once(base, retry_prompt, repo_root, timeout, creation_flags)
+                rc2, out2, err2 = _invoke(active_base, retry_prompt)
             except subprocess.TimeoutExpired as e:
                 retry_err = (e.stderr or "") if isinstance(e.stderr, str) else ""
                 print(
@@ -323,7 +417,9 @@ def run_cursor_cli(
             if err2.strip():
                 print(err2, file=sys.stderr)
             if rc2 == 0 and out2.strip():
-                return parse_cli_stdout_to_ai_dict(out2)
+                result = parse_cli_stdout_to_ai_dict(out2)
+                _maybe_save_chat_id_from_stdout(out2, repo_root, opts, reuse_enabled)
+                return result
             retry_err = err2[-800:].strip()
             retry_out = out2[:200].strip()
             if retry_err or retry_out:
@@ -342,7 +438,9 @@ def run_cursor_cli(
         )
         raise ValueError(f"cursor_cli returned empty stdout. stderr (tail): {err_tail!r}. {hint}")
 
-    return parse_cli_stdout_to_ai_dict(out)
+    result = parse_cli_stdout_to_ai_dict(out)
+    _maybe_save_chat_id_from_stdout(out, repo_root, opts, reuse_enabled)
+    return result
 
 
 def generate_via_cursor_cli(
