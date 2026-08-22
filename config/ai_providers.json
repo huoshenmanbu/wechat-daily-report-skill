@@ -1,0 +1,15 @@
+{
+  "cursor_cli": {
+    "command": ["agent"]
+  },
+  "dashscope": {
+    "api_key_env": "DASHSCOPE_API_KEY",
+    "model": "qwen-plus",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  },
+  "volc_ark": {
+    "api_key_env": "ARK_API_KEY",
+    "endpoint_id": "",
+    "region": ""
+  }
+}

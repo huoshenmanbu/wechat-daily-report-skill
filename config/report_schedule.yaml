@@ -3,7 +3,7 @@
 # python scripts/schedule_report.py --config config/report_schedule.yaml
 
 interval_minutes: 60
-chatroom: 示例群名
+chatroom: 牛市来了，一定要学更多
 decrypted_dir:
 
 output_dir: outputs/reports
@@ -18,7 +18,7 @@ skip_refresh: false
 # 单次进程最多补跑窗口数（停机后积压）
 max_catchup_windows: 24
 
-provider: stub
+provider: cursor_cli
 provider_timeout_seconds: 90
 analyze_timeout_seconds: 600
 report_timeout_seconds: 300
