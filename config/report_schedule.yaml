@@ -24,7 +24,7 @@ skip_refresh: false
 max_catchup_windows: 24
 
 provider: cursor_cli
-provider_timeout_seconds: 180
+provider_timeout_seconds: 90
 analyze_timeout_seconds: 600
 report_timeout_seconds: 300
 max_chat_chars: 200000
