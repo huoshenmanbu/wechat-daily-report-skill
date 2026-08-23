@@ -12,6 +12,11 @@ output_format: md
 
 align_mode: floor
 min_messages: 5
+# 逗号分隔的重点成员昵称或微信 ID；其含催化剂、链接、合约地址等证据的消息会被优先展示
+# focus_members: Alice,Bob
+# 低活跃整窗跳过（0 关闭）：0 < 消息条数 < 阈值时不跑 AI/报告，可选发飞书短讯；若阈值 >= min_messages，则 min_messages 精简分支对正计数窗口永不生效（启动时 stderr 警告）
+# low_activity_skip_threshold: 50
+# low_activity_skip_message: "【跳过】{chatroom} {start}-{end} 共 {total_count} 条 < {threshold}"
 retry_times: 1
 skip_refresh: false
 

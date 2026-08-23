@@ -10,6 +10,10 @@ try:
     from scripts.wechat_decrypted_reader import DEFAULT_DECRYPTED_DIR, load_chatroom_records
 except ModuleNotFoundError:
     from wechat_decrypted_reader import DEFAULT_DECRYPTED_DIR, load_chatroom_records
+try:
+    from scripts.alpha_signals import extract_alpha_candidates
+except ModuleNotFoundError:
+    from alpha_signals import extract_alpha_candidates
 
 # Try to import jieba, fallback if not available
 try:
@@ -30,6 +34,7 @@ def parse_arguments():
     parser.add_argument('--skip-refresh', action='store_true', help='Skip running decrypt refresh before analysis')
     parser.add_argument('--output-stats', default='stats.json', help='Path to output statistics JSON')
     parser.add_argument('--output-text', default='simplified_chat.txt', help='Path to output simplified text for AI')
+    parser.add_argument('--focus-members', default='', help='Comma-separated member names or IDs to prioritize')
     return parser.parse_args()
 
 
@@ -168,6 +173,8 @@ def analyze(args):
         end=args.end,
     )
     messages = data.get('messages', [])
+    focus_members = [name.strip() for name in (args.focus_members or '').split(',') if name.strip()]
+    alpha_candidates = extract_alpha_candidates(messages, focus_members=focus_members)
     sender_avatar_map, name_avatar_map = build_avatar_maps(data, messages)
     
     # Basic Stats
@@ -401,11 +408,15 @@ def analyze(args):
             "date": date_str,
             "total_count": total_messages,
             "active_user_count": len(active_users),
-            "time_range": f"{start_dt.strftime('%H:%M')} 至 {end_dt.strftime('%H:%M')}"
+            "time_range": f"{start_dt.strftime('%H:%M')} 至 {end_dt.strftime('%H:%M')}",
+            "focus_members": focus_members,
+            # Keep paths in meta for provider fallback when the base text file was split.
+            "raw_text_paths": chunk_paths,
         },
         "top_talkers": top_talkers,
         "night_owl": night_owl,
         "word_cloud": word_cloud_data,
+        "alpha_candidates": alpha_candidates,
         "name_avatar_map": name_avatar_map,
         "raw_text_paths": chunk_paths
     }

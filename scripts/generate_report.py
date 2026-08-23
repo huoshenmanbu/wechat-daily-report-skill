@@ -151,6 +151,36 @@ def _fmt_list(items, fallback="无"):
     return "、".join(values) if values else fallback
 
 
+def _resolve_alpha_sections(stats, ai_content):
+    """Return validated focus, action, and deterministic candidate lists."""
+    focus_list = ai_content.get("investment_meme_focus", [])
+    if not isinstance(focus_list, list) or not focus_list:
+        fallback_focus = ai_content.get("watchlist", [])
+        focus_list = fallback_focus if isinstance(fallback_focus, list) else []
+
+    actions = ai_content.get("alpha_actions", [])
+    if not isinstance(actions, list):
+        actions = []
+    if not actions:
+        legacy_items = ai_content.get("key_information", [])
+        if isinstance(legacy_items, list):
+            actions = [
+                item
+                for item in legacy_items
+                if isinstance(item, dict)
+                and str(item.get("action_or_followup") or "").strip()
+            ]
+
+    alpha_candidates = stats.get("alpha_candidates", [])
+    if not isinstance(alpha_candidates, list):
+        alpha_candidates = []
+    return focus_list, actions, alpha_candidates
+
+
+def _has_actionable_alpha(stats, ai_content):
+    return any(_resolve_alpha_sections(stats, ai_content))
+
+
 def _ai_narrative_empty(ai_content):
     """无讨论热点/问答/对话等模型产出时视为「叙事为空」（含 ai_content 为 {}）。"""
     if not ai_content:
@@ -232,181 +262,85 @@ def _read_simplified_excerpt(stats, stats_json_path: str, *, max_lines: int = 12
 
 def build_text_report(stats, ai_content, stats_json_path: str = ""):
     meta = stats.get("meta", {})
+    focus_list, actions, alpha_candidates = _resolve_alpha_sections(stats, ai_content)
+
+    # Empty Alpha windows are intentionally silent: a report containing only
+    # chat metadata or filler would create notification noise.
+    if not focus_list and not actions and not alpha_candidates:
+        return ""
+
     lines = []
-    lines.append(f"# {meta.get('name', '群聊')} 总结")
+    lines.append(f"# {meta.get('name', '群聊')} Alpha 快报")
     lines.append("")
     lines.append(f"- 日期: {meta.get('date', 'N/A')}")
     lines.append(f"- 统计周期: {meta.get('time_range', 'N/A')}")
-    lines.append(f"- 总消息数: {meta.get('total_count', 0)}")
-    lines.append("")
 
-    # NOTE: "话唠榜" intentionally hidden in report output.
-    # Stats are still computed and can be used by downstream logic if needed.
+    provider_status = ai_content.get("_provider_status", {})
+    if isinstance(provider_status, dict) and provider_status.get("ok") is False:
+        lines.append(
+            f"> ⚠️ AI 摘要生成失败（provider: {provider_status.get('provider', 'unknown')}）；"
+            "以下仅为本地筛选的原始 Alpha 线索。"
+        )
 
     summary = ai_content.get("summary", {})
     if isinstance(summary, dict) and summary:
-        lines.append("## 本段概览")
         if summary.get("overview"):
-            lines.append(f"- 摘要：{summary.get('overview')}")
-        if summary.get("group_sentiment"):
-            lines.append(f"- 情绪：{summary.get('group_sentiment')}")
-        kws = summary.get("keywords", [])
-        if kws:
-            lines.append(f"- 关键词：{_fmt_list(kws)}")
-        lines.append("")
+            lines.append(f"> {summary.get('overview')}")
 
-    if _ai_narrative_empty(ai_content) and stats_json_path:
-        excerpt = _read_simplified_excerpt(stats, stats_json_path)
-        if excerpt:
-            lines.append("## 群聊原文摘录（节选）")
-            lines.append("")
-            lines.append("> 本段来自 `analyze_chat` 导出的压缩原文，**不是**模型摘要。")
-            lines.append(
-                "> 若已配置 AI provider（如 `cursor_cli`）并成功生成 `ai_content`，"
-                "将优先展示「讨论热点」等章节。"
-            )
-            lines.append("")
-            lines.append("```text")
-            lines.append(excerpt)
-            lines.append("```")
-            lines.append("")
-
-    topics = ai_content.get("topics", [])
-    if topics:
-        lines.append("## 讨论热点")
-        for idx, topic in enumerate(topics, 1):
-            lines.append(f"{idx}. {topic.get('title', '未命名话题')}（{topic.get('category', '未分类')}）")
-            lines.append(f"   - 摘要：{topic.get('summary', '')}")
-            related_people = topic.get("related_people", [])
-            if related_people:
-                lines.append(f"   - 相关成员：{_fmt_list(related_people)}")
-            if topic.get("heat") not in (None, ""):
-                lines.append(f"   - 热度：{topic.get('heat')}")
-        lines.append("")
-
-    member_sentiment = ai_content.get("member_sentiment", [])
-    if member_sentiment:
-        lines.append("## 成员情绪")
-        for idx, row in enumerate(member_sentiment, 1):
-            lines.append(
-                f"{idx}. {row.get('name', '未知')}：{row.get('sentiment', '中性')} / {row.get('stance', '观望')}"
-            )
-            if row.get("evidence"):
-                lines.append(f"   - 依据：{row.get('evidence')}")
-        lines.append("")
-
-    resources = ai_content.get("knowledge_and_resources", [])
-    if not resources:
-        resources = ai_content.get("resources", [])
-    if resources:
-        lines.append("## 资源分享")
-        for idx, res in enumerate(resources, 1):
-            lines.append(f"{idx}. [{res.get('type', '资源')}] {res.get('title', '未命名资源')}")
-            lines.append(
-                f"   - 分享者：{res.get('sharer', '未知')} | 时间：{res.get('time', 'N/A')} | 分类：{res.get('category', '未分类')}"
-            )
-            if res.get("description"):
-                lines.append(f"   - 简介：{res.get('description')}")
-            kp = res.get("key_points", [])
-            if kp:
-                lines.append(f"   - 要点：{_fmt_list(kp)}")
-            if res.get("url"):
-                lines.append(f"   - 链接：{res.get('url')}")
-        lines.append("")
-
-    focus_list = ai_content.get("investment_meme_focus", [])
-    if not focus_list:
-        focus_list = ai_content.get("watchlist", [])
+    lines.append("")
+    lines.append("## 交易/标的")
     if focus_list:
-        lines.append("## 投资与 Meme 重点")
-        for idx, w in enumerate(focus_list, 1):
+        for w in focus_list:
             symbol = w.get("symbol_or_theme", w.get("symbol", "UNKNOWN"))
             bias = w.get("market_bias", w.get("bias", "观望"))
-            confidence = w.get("confidence", "")
-            lines.append(f"{idx}. {symbol}（{bias}）")
-            w_type = w.get("type")
-            if w_type:
-                lines.append(f"   - 类型：{w_type}")
-            if confidence != "":
-                lines.append(f"   - 置信度：{confidence}")
             reason = w.get("why_mentioned", w.get("reason", ""))
-            if reason:
-                lines.append(f"   - 原因：{reason}")
             conditions = w.get("key_signals", w.get("conditions", []))
-            if conditions:
-                lines.append(f"   - 观察条件：{_fmt_list(conditions)}")
             risk = w.get("risks", w.get("risk", []))
+            parts = [f"{symbol}：{bias}"]
+            if reason:
+                parts.append(str(reason).strip())
+            if conditions:
+                parts.append(f"观察：{_fmt_list(conditions)}")
             if risk:
-                lines.append(f"   - 风险：{_fmt_list(risk)}")
-        lines.append("")
+                parts.append(f"风险：{_fmt_list(risk)}")
+            lines.append(f"- {'；'.join(parts)}")
+    else:
+        lines.append("- 本时段未识别到明确的投资标的或方向。")
 
-    key_info = ai_content.get("key_information", [])
-    if key_info:
-        lines.append("## 关键信息与重点信息")
-        for idx, item in enumerate(key_info, 1):
-            lines.append(f"{idx}. [{item.get('level', '重点')}] {item.get('title', '未命名信息')}")
-            if item.get("detail"):
-                lines.append(f"   - 详情：{item.get('detail')}")
-            source_people = item.get("source_people", [])
-            if source_people:
-                lines.append(f"   - 来源成员：{_fmt_list(source_people)}")
-            if item.get("time_range"):
-                lines.append(f"   - 时间段：{item.get('time_range')}")
-            if item.get("action_or_followup"):
-                lines.append(f"   - 后续动作：{item.get('action_or_followup')}")
-        lines.append("")
+    lines.append("")
+    lines.append("## 可行动信号")
+    if actions:
+        for item in actions:
+            if "action" in item:
+                action = item.get("action", "待观察")
+                detail = item.get("detail", "")
+            else:
+                action = item.get("action_or_followup", "待观察")
+                detail = item.get("detail") or item.get("title", "")
+            people = item.get("source_people", [])
+            line = str(action).strip()
+            if detail:
+                line += f"；{str(detail).strip()}"
+            if people:
+                line += f"（来源：{_fmt_list(people)}）"
+            lines.append(f"- {line}")
+    else:
+        lines.append("- 暂无明确买入、卖出或跟踪动作。")
 
-    important_messages = ai_content.get("important_messages", [])
-    if important_messages:
-        lines.append("## 重要消息")
-        for idx, msg in enumerate(important_messages, 1):
-            sender = msg.get("sender", msg.get("speaker", "未知"))
-            summary = msg.get("summary", msg.get("message", ""))
-            lines.append(
-                f"{idx}. [{msg.get('priority', '中')}] {sender} @ {msg.get('time', 'N/A')}: {summary}"
-            )
-            content = msg.get("content", msg.get("message", ""))
-            if content:
-                lines.append(f"   - 内容：{content}")
-        lines.append("")
+    other_activity = str(ai_content.get("other_activity", "")).strip()
+    lines.append("")
+    lines.append("## 其他动态")
+    lines.append(f"- {other_activity or '其余为闲聊或低信号内容，无新增投资信息。'}")
 
-    # Optional compatibility blocks (older schema)
-    qas = ai_content.get("qas", [])
-    if qas:
-        lines.append("## 问答精选")
-        for idx, qa in enumerate(qas, 1):
-            q = qa.get("question", qa.get("q", ""))
-            a = qa.get("answer", qa.get("a", ""))
-            lines.append(f"{idx}. Q: {q}")
-            lines.append(f"   - A: {a}")
-        lines.append("")
-
-    topic_heat = ai_content.get("topic_heat", [])
-    if topic_heat:
-        lines.append("## 话题热度")
-        for idx, heat in enumerate(topic_heat, 1):
-            lines.append(
-                f"{idx}. {heat.get('name', '未命名话题')}：{heat.get('count', 0)} 条（{heat.get('percent', 0)}%）"
-            )
-        lines.append("")
-
-    night_owl = stats.get("night_owl")
-    if isinstance(night_owl, dict):
-        lines.append("## 深夜活跃")
-        lines.append(
-            f"- {night_owl.get('name', '未知')}（最晚活跃 {night_owl.get('last_time', 'N/A')}，深夜消息 {night_owl.get('msg_count', 0)} 条）"
-        )
-        if night_owl.get("last_msg"):
-            lines.append(f"- 最后一条：{night_owl.get('last_msg')}")
-        lines.append("")
-
-    word_cloud = stats.get("word_cloud", [])
-    if word_cloud:
-        lines.append("## 词云高频词")
-        sorted_words = sorted(word_cloud, key=lambda x: x.get("count", 0), reverse=True)
-        for idx, item in enumerate(sorted_words[:15], 1):
-            lines.append(f"{idx}. {item.get('text', '')}（{item.get('count', 0)}）")
-        lines.append("")
+    if not focus_list and not actions:
+        if isinstance(alpha_candidates, list) and alpha_candidates:
+            lines.append("")
+            lines.append("## 优先关注线索")
+            for item in alpha_candidates:
+                signals = _fmt_list(item.get("signals", []))
+                lines.append(
+                    f"- {item.get('sender', '未知')} @ {item.get('time', 'N/A')}（{signals}）：{item.get('content', '')}"
+                )
 
     lines.append(f"_生成时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_")
     return "\n".join(lines).rstrip() + "\n"
@@ -467,24 +401,27 @@ def main():
             f.write(text_output)
         print(f"Text report generated: {args.output}")
     elif output_ext == '.html':
-        try:
-            from jinja2 import Environment, FileSystemLoader
-        except ImportError:
-            raise RuntimeError(
-                "HTML output requires 'jinja2'. Install with: pip install jinja2"
-            )
-
-        if args.template:
-            template_dir = os.path.dirname(args.template)
-            template_name = os.path.basename(args.template)
+        if not _has_actionable_alpha(stats, ai_content):
+            html_output = ""
         else:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            template_dir = os.path.join(script_dir, '..', 'assets')
-            template_name = 'report_template.html'
+            try:
+                from jinja2 import Environment, FileSystemLoader
+            except ImportError:
+                raise RuntimeError(
+                    "HTML output requires 'jinja2'. Install with: pip install jinja2"
+                )
 
-        env = Environment(loader=FileSystemLoader(template_dir))
-        template = env.get_template(template_name)
-        html_output = template.render(**context)
+            if args.template:
+                template_dir = os.path.dirname(args.template)
+                template_name = os.path.basename(args.template)
+            else:
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                template_dir = os.path.join(script_dir, '..', 'assets')
+                template_name = 'report_template.html'
+
+            env = Environment(loader=FileSystemLoader(template_dir))
+            template = env.get_template(template_name)
+            html_output = template.render(**context)
         with open(args.output, 'w', encoding='utf-8') as f:
             f.write(html_output)
         print(f"HTML report generated: {args.output}")

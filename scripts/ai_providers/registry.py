@@ -7,10 +7,11 @@ from typing import Any, Dict, Optional
 
 from ai_providers.cursor_cli import generate_via_cursor_cli
 from ai_providers.dashscope import generate_dashscope
+from ai_providers.deepseek import generate_deepseek
 from ai_providers.stub import build_stub_ai_content
 from ai_providers.volc_ark import generate_volc_ark
 
-REGISTERED = {"stub", "cursor_cli", "dashscope", "volc_ark"}
+REGISTERED = {"stub", "cursor_cli", "dashscope", "deepseek", "volc_ark"}
 
 
 def run_provider(
@@ -37,8 +38,10 @@ def run_provider(
         return generate_via_cursor_cli(prompt_text, repo_root, provider_options)
 
     if key == "dashscope":
-        generate_dashscope()
-        raise RuntimeError("Provider 'dashscope' returned unexpectedly")
+        return generate_dashscope(prompt_text, provider_options)
+
+    if key == "deepseek":
+        return generate_deepseek(prompt_text, provider_options)
 
     if key == "volc_ark":
         generate_volc_ark()

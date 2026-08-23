@@ -7,6 +7,12 @@
     "model": "qwen-plus",
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
   },
+  "deepseek": {
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "model": "deepseek-v4-flash",
+    "base_url": "https://api.deepseek.com",
+    "response_format_json": true
+  },
   "volc_ark": {
     "api_key_env": "ARK_API_KEY",
     "endpoint_id": "",

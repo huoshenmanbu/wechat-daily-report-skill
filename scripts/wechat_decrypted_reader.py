@@ -104,6 +104,7 @@ def format_app_message(content):
         return None
 
     title = collapse_text(appmsg.findtext("title") or "")
+    url = collapse_text(html.unescape(appmsg.findtext("url") or ""))
     app_type = parse_int(appmsg.findtext("type"))
 
     if app_type == 57:
@@ -117,7 +118,8 @@ def format_app_message(content):
         return 0, f"回复 {reference}"
 
     if title:
-        return 0, f"分享链接《{title}》"
+        suffix = f" {url}" if url else ""
+        return 0, f"分享链接《{title}》{suffix}"
     return 99, "[链接/文件]"
 
 

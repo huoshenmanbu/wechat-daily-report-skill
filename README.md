@@ -77,9 +77,11 @@ Claude 将自动调用本项目中的脚本，从解密后的原始数据库读�
 - `chatroom`: 群名关键词或 chatroom id
 - `output_format`: `md`（默认）或 `html`
 - `min_messages`: 低活跃阈值（低于阈值走精简内容）
+- `low_activity_skip_threshold`: 可选，默认 `0` 表示关闭。设为大于 `0` 时，若本窗 `0 < total_count < 阈值`，则**不跑** AI 与 `generate_report`（不写 `report_*.md`），仅保留 analyze 产出的 stats/精简文本；若 `sender` 不是 `none`，会发一条简短飞书文本说明跳过（`send_report_with_retry` 与正式报告相同超时/重试）。`last_result` 为 `skipped_low_activity`。`--force` 只影响「报告已存在是否重跑」，**不会**绕过该阈值。若 `low_activity_skip_threshold >= min_messages`，则 `min_messages` 精简分支对「有条数」的窗口永远不会命中，启动时会在 stderr 打出警告。
+- `low_activity_skip_message`: 可选，自定义上述通知正文；支持 Python `str.format` 占位符：`{chatroom}`、`{start}`、`{end}`、`{total_count}`、`{threshold}`。格式失败时回退到内置中文模板。
 - `max_catchup_windows`: 单次运行最多补跑几个积压窗口（默认 24）
 - `analyze_timeout_seconds` / `report_timeout_seconds` / `provider_timeout_seconds`: 子进程与 Provider 超时（秒）
-- `provider`: `stub`（默认，离线占位）| `cursor_cli`（调用本机 Cursor CLI）| `dashscope` / `volc_ark`（预留，尚未实现）
+- `provider`: `stub`（默认，离线占位）| `cursor_cli`（调用本机 Cursor CLI）| `dashscope`（千问 API）| `deepseek`（DeepSeek API）| `volc_ark`（预留，尚未实现）
 - `provider_config_file`: 可选，指向 JSON（见 `config/ai_providers.example.json`），按后端分区的参数（如 `cursor_cli.command`）
 - `max_chat_chars`: 可选，读取精简聊天文本时的总字符上限（默认 `0` 表示不限制；建议按模型能力配置，如 `200000`）
 - `sender`: `none`（默认，不发送）| `feishu_cli_webhook`（首期可用）| `feishu_cli_card` / `feishu_im_api`（预留）
@@ -89,6 +91,8 @@ Claude 将自动调用本项目中的脚本，从解密后的原始数据库读�
 - `sender_strict`: 发送失败是否让任务失败退出（默认 `false`）
 
 **Cursor CLI（`provider: cursor_cli`）**：需已安装 Cursor CLI，并将 `agent`（或完整可执行文件路径）放在 `PATH`，或把完整命令前缀写在 `provider_config_file` 的 `cursor_cli.command` 数组中。**首次或非交互运行**时 CLI 会要求「信任工作区」：脚本已默认附加 `--trust`（可在 JSON 里设 `cursor_cli.trust_workspace: false` 关闭）。手动测试若出现 “Workspace Trust Required”，在命令中加上 `--trust` 即可。**Windows**：Python 直接以子进程调用 `agent --print` 时，部分 Cursor Agent 版本会出现退出码 0 但 stdout 为空；脚本会自动改用 PowerShell 包装 `agent`，并解析 Cursor CLI 的 `{"type":"result","result":"..."}` 输出 envelope。请不要设置 `cursor_cli.hide_window: true`（默认即为不隐藏）。如 agent 等待工具授权，可尝试 `cursor_cli.force: true`（自动允许命令，有风险）。非交互模式仍可能对工作区产生副作用，若介意请使用专用克隆目录或查阅 Cursor 文档中的 workspace/worktree 选项。
+
+**千问 / DeepSeek（`provider: dashscope` 或 `provider: deepseek`）**：在系统环境变量中分别设置 `DASHSCOPE_API_KEY` 或 `DEEPSEEK_API_KEY`，然后将 `provider` 切换为对应值。模型、HTTPS `base_url`、超时、`max_tokens`、JSON 输出选项，以及 `retry_times` / `retry_backoff_seconds` 可在 `config/ai_providers.json` 中调整；429、5xx 与临时网络错误会自动重试，API Key 不应写入该文件。
 
 **可选：固定会话续聊（`cursor_cli.reuse_session`）**：默认 `false`，每次调度仍为新的 `agent -p` 调用。设为 `true` 时，会在仓库根下（默认 `runtime/cursor_cli_session.json`，已在 `.gitignore`）读写 `chat_id`：若文件中有 id，则附加 `--resume <id>`；若 CLI 返回的 JSON envelope 中含 `sessionId` / `chatId` / `conversationId` / `threadId` 之一，会自动写回文件。`resume_style`：`explicit_id`（默认，依赖上述 id）或 `continue`（附加 `--continue`，需本机 CLI 支持且行为以官方文档为准）。`on_resume_failure`：`clear_and_retry_fresh`（默认，带 resume 时若 agent 非零退出则清空状态并无 resume 再跑一轮）、`raise`（不重试）、`clear_only`（清空状态后仍按原错误失败）。自动化场景下 resume 行为以 Cursor 版本为准；额度仍主要取决于每次请求的上下文与输出 token。重置会话：删除 `runtime/cursor_cli_session.json` 或关掉 `reuse_session`。
 

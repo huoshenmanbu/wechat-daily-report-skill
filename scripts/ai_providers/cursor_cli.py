@@ -49,6 +49,10 @@ def _digest_score(d: Dict[str, Any]) -> int:
             score += 2
     if isinstance(d.get("summary"), dict):
         score += 3
+    # Compact Alpha reports omit broad discussion sections in favour of a small
+    # action list. Treat that list as a first-class schema signal.
+    if isinstance(d.get("alpha_actions"), list):
+        score += 2
     topics = d.get("topics")
     if isinstance(topics, list) and topics:
         score += 2

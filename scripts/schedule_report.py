@@ -11,12 +11,11 @@ import argparse
 import copy
 import datetime as dt
 import json
+import multiprocessing
 import os
 import subprocess
 import sys
 import time
-import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -133,6 +132,13 @@ def _load_config(path: str) -> Dict[str, Any]:
         "output_format": str(data.get("output_format", "md")).strip().lower(),
         "align_mode": str(data.get("align_mode", "floor")).strip().lower(),
         "min_messages": _parse_int_field(data, "min_messages", 5, minimum=0),
+        "low_activity_skip_threshold": _parse_int_field(
+            data, "low_activity_skip_threshold", 0, minimum=0, maximum=1_000_000
+        ),
+        "low_activity_skip_message": str(data.get("low_activity_skip_message", "") or "").strip(),
+        "focus_members": [
+            name.strip() for name in str(data.get("focus_members", "") or "").split(",") if name.strip()
+        ],
         "retry_times": _parse_int_field(data, "retry_times", 1, minimum=0),
         "skip_refresh": _parse_bool(data.get("skip_refresh", False), False),
         "provider": str(data.get("provider", "stub")).strip().lower(),
@@ -160,7 +166,7 @@ def _load_config(path: str) -> Dict[str, Any]:
         raise ValueError("Config `output_format` must be one of: md, txt, html.")
     if cfg["align_mode"] not in ("floor", "rolling"):
         raise ValueError("Config `align_mode` must be one of: floor, rolling.")
-    _providers_allowed = {"stub", "cursor_cli", "dashscope", "volc_ark"}
+    _providers_allowed = {"stub", "cursor_cli", "dashscope", "deepseek", "volc_ark"}
     if cfg["provider"] not in _providers_allowed:
         raise ValueError(
             f"Config `provider` must be one of {sorted(_providers_allowed)}, got {cfg['provider']!r}."
@@ -194,6 +200,17 @@ def _load_config(path: str) -> Dict[str, Any]:
             cfg["sender_options"] = json.load(f)
     else:
         cfg["sender_options"] = {}
+
+    lt = cfg["low_activity_skip_threshold"]
+    if lt > 0 and lt >= cfg["min_messages"]:
+        print(
+            "[scheduler] warning: `low_activity_skip_threshold` ("
+            f"{lt}) >= `min_messages` ({cfg['min_messages']}); "
+            "the minimal-AI (`min_messages`) branch will never run for windows with "
+            "messages: every positive count is either fully skipped (< threshold) or "
+            "not below `min_messages`.",
+            file=sys.stderr,
+        )
 
     return cfg
 
@@ -322,6 +339,18 @@ def _read_stats_total_count(path: str) -> int:
         return 0
 
 
+def _read_stats_alpha_candidate_count(path: str) -> int:
+    if not os.path.exists(path):
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        candidates = data.get("alpha_candidates") or []
+        return len(candidates) if isinstance(candidates, list) else 0
+    except Exception:
+        return 0
+
+
 def _run_cmd(cmd, cwd: Path, timeout: Optional[float] = None):
     return subprocess.run(
         cmd,
@@ -380,6 +409,39 @@ def _build_paths(cfg: Dict[str, Any], start: dt.datetime, end: dt.datetime) -> D
     }
 
 
+def _killable_process_entry(send_conn, target, args, kwargs) -> None:
+    try:
+        target(*args, **kwargs)
+        send_conn.send(("ok", "", ""))
+    except BaseException as exc:
+        send_conn.send(("error", type(exc).__name__, str(exc)[:1000]))
+    finally:
+        send_conn.close()
+
+
+def _run_in_killable_process(target, args, kwargs, *, timeout: float) -> None:
+    """Run a provider in a child process so a wall-clock timeout can terminate it."""
+    ctx = multiprocessing.get_context("spawn")
+    recv_conn, send_conn = ctx.Pipe(duplex=False)
+    process = ctx.Process(target=_killable_process_entry, args=(send_conn, target, args, kwargs))
+    process.daemon = True
+    process.start()
+    send_conn.close()
+    process.join(max(0.01, float(timeout)))
+    if process.is_alive():
+        process.terminate()
+        process.join(5)
+        recv_conn.close()
+        raise TimeoutError(f"provider exceeded {timeout}s")
+
+    status = recv_conn.recv() if recv_conn.poll() else None
+    recv_conn.close()
+    if status and status[0] == "error":
+        raise RuntimeError(f"provider child failed ({status[1]}): {status[2]}")
+    if process.exitcode not in (0, None):
+        raise RuntimeError(f"provider child exited with code {process.exitcode}")
+
+
 def _run_provider_with_timeout(
     cfg: Dict[str, Any],
     stats_path: str,
@@ -388,33 +450,80 @@ def _run_provider_with_timeout(
 ) -> None:
     timeout = max(cfg["provider_timeout_seconds"], 1)
 
-    def _call():
-        provider_options = copy.deepcopy(cfg.get("provider_options") or {})
-        if cfg["provider"] == "cursor_cli":
-            cursor_opts = provider_options.setdefault("cursor_cli", {})
-            if isinstance(cursor_opts, dict):
-                cursor_opts.setdefault("timeout_seconds", timeout)
+    provider_options = copy.deepcopy(cfg.get("provider_options") or {})
+    if cfg["provider"] == "cursor_cli":
+        cursor_opts = provider_options.setdefault("cursor_cli", {})
+        if isinstance(cursor_opts, dict):
+            cursor_opts.setdefault("timeout_seconds", timeout)
+    elif cfg["provider"] in {"dashscope", "deepseek"}:
+        api_opts = provider_options.setdefault(cfg["provider"], {})
+        if isinstance(api_opts, dict):
+            api_opts.setdefault("timeout_seconds", timeout)
 
-        generate_ai_content(
-            cfg["provider"],
-            stats_path,
-            ai_path,
-            text_path=text_path,
-            provider_options=provider_options,
-            max_chat_chars=cfg.get("max_chat_chars"),
-            repo_root=str(REPO_ROOT),
-        )
+    args = (cfg["provider"], stats_path, ai_path)
+    kwargs = {
+        "text_path": text_path,
+        "provider_options": provider_options,
+        "max_chat_chars": cfg.get("max_chat_chars"),
+        "repo_root": str(REPO_ROOT),
+    }
 
     if cfg["provider"] == "cursor_cli":
-        _call()
+        generate_ai_content(*args, **kwargs)
         return
+    _run_in_killable_process(generate_ai_content, args, kwargs, timeout=timeout)
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        fut = pool.submit(_call)
+
+def _format_low_activity_skip_message(
+    cfg: Dict[str, Any],
+    start: dt.datetime,
+    end: dt.datetime,
+    total_count: int,
+    threshold: int,
+) -> str:
+    """Build Feishu/plain-text body when a window is skipped for low activity."""
+    tpl = (cfg.get("low_activity_skip_message") or "").strip()
+    if tpl:
         try:
-            fut.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            raise TimeoutError(f"provider exceeded {timeout}s") from None
+            return tpl.format(
+                chatroom=cfg.get("chatroom", ""),
+                start=_fmt_time(start),
+                end=_fmt_time(end),
+                total_count=total_count,
+                threshold=threshold,
+            )
+        except (KeyError, ValueError) as e:
+            print(
+                f"[scheduler] warning: low_activity_skip_message format failed ({e!r}); "
+                "using built-in template.",
+                file=sys.stderr,
+            )
+    return (
+        f"【群聊总结跳过】{cfg.get('chatroom', '')} 窗口 {_fmt_time(start)} ~ {_fmt_time(end)} "
+        f"仅 {total_count} 条消息（<{threshold}），本窗不调用 AI、不生成报告；下一时段将继续。"
+    )
+
+
+def _run_sender_text(cfg: Dict[str, Any], text: str) -> Dict[str, Any]:
+    """Send arbitrary text via configured sender (same retry/timeout as report sender)."""
+    sender = cfg.get("sender", "none")
+    if sender == "none":
+        return {
+            "ok": True,
+            "provider": "none",
+            "message_id": None,
+            "error_code": None,
+            "error": None,
+            "attempts": 0,
+        }
+    return send_report_with_retry(
+        sender,
+        {"text": text},
+        cfg.get("sender_options") or {},
+        timeout_seconds=cfg.get("sender_timeout_seconds", 30),
+        retry_times=cfg.get("sender_retry_times", 1),
+        retry_backoff_seconds=cfg.get("sender_retry_backoff_seconds", 2),
+    )
 
 
 def _run_sender_with_timeout(
@@ -518,6 +627,8 @@ def process_one_window(
         analyze_cmd.extend(["--decrypted-dir", cfg["decrypted_dir"]])
     if cfg["skip_refresh"]:
         analyze_cmd.append("--skip-refresh")
+    if cfg.get("focus_members"):
+        analyze_cmd.extend(["--focus-members", ",".join(cfg["focus_members"])])
 
     retries = max(cfg["retry_times"], 0)
     last_err = None
@@ -535,7 +646,8 @@ def process_one_window(
         return 2
 
     total_count = _read_stats_total_count(paths["stats"])
-    print(f"[scheduler] total_count={total_count}")
+    alpha_candidate_count = _read_stats_alpha_candidate_count(paths["stats"])
+    print(f"[scheduler] total_count={total_count} alpha_candidate_count={alpha_candidate_count}")
 
     if total_count == 0:
         print("[scheduler] empty window, skip report generation")
@@ -549,17 +661,91 @@ def process_one_window(
             _atomic_write_json(cfg["state_file"], new_state)
         return 0
 
+    skip_th = int(cfg.get("low_activity_skip_threshold") or 0)
+    if skip_th > 0 and 0 < total_count < skip_th and alpha_candidate_count == 0:
+        print(
+            f"[scheduler] low_activity_skip: total_count={total_count} < "
+            f"low_activity_skip_threshold={skip_th}; skipping AI and report "
+            "(runtime stats/text from analyze are still on disk)"
+        )
+        notice = _format_low_activity_skip_message(cfg, start, end, total_count, skip_th)
+        sender_result: Dict[str, Any] = {
+            "ok": True,
+            "provider": "none",
+            "message_id": None,
+            "error_code": None,
+            "error": None,
+            "attempts": 0,
+        }
+        try:
+            sender_result = _run_sender_text(cfg, notice)
+        except Exception as e:
+            sender_result = {
+                "ok": False,
+                "provider": cfg.get("sender", "none"),
+                "message_id": None,
+                "error_code": type(e).__name__,
+                "error": str(e),
+                "attempts": 1,
+            }
+        if not sender_result.get("ok"):
+            print(
+                "[sender] failed: "
+                f"provider={sender_result.get('provider')} "
+                f"code={sender_result.get('error_code')} "
+                f"error={sender_result.get('error')}"
+            )
+            strict_sender_fail = bool(cfg.get("sender_strict", False))
+        else:
+            print(
+                "[sender] ok: "
+                f"provider={sender_result.get('provider')} "
+                f"message_id={sender_result.get('message_id')}"
+            )
+            strict_sender_fail = False
+        if update_state:
+            new_state = {
+                "last_end": end.isoformat(),
+                "last_success_job_id": paths["window_id"],
+                "last_run_at": dt.datetime.now().isoformat(),
+                "last_result": "skipped_low_activity",
+                "last_sender_result": "ok" if sender_result.get("ok") else "error",
+                "last_sender_provider": sender_result.get("provider"),
+                "last_sender_error": sender_result.get("error"),
+                "last_sender_at": dt.datetime.now().isoformat(),
+            }
+            _atomic_write_json(cfg["state_file"], new_state)
+        if strict_sender_fail:
+            return 4
+        print("[scheduler] window done (skipped_low_activity)")
+        return 0
+
+    provider_result = "ok"
+    provider_error = None
     if total_count < cfg["min_messages"]:
         with open(paths["ai"], "w", encoding="utf-8") as f:
             json.dump({}, f, ensure_ascii=False, indent=2)
         print("[scheduler] low activity, using minimal ai_content")
+        provider_result = "skipped_low_activity"
     else:
         try:
             _run_provider_with_timeout(cfg, paths["stats"], paths["ai"], paths["text"])
         except Exception as e:
             print(f"[provider] fallback to minimal ai_content because: {e}")
+            provider_result = "error"
+            provider_error = str(e)[:1000]
             with open(paths["ai"], "w", encoding="utf-8") as f:
-                json.dump({}, f, ensure_ascii=False, indent=2)
+                json.dump(
+                    {
+                        "_provider_status": {
+                            "ok": False,
+                            "provider": cfg.get("provider", "unknown"),
+                        }
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
 
     report_cmd = [
         cfg["python_executable"],
@@ -577,6 +763,25 @@ def process_one_window(
         print(ret.stdout)
         print(ret.stderr)
         return 3
+
+    # An empty Alpha report means there was no actionable investment signal.
+    # Do not leave an empty artifact or send a notification for that window.
+    if os.path.isfile(paths["report"]) and os.path.getsize(paths["report"]) == 0:
+        os.remove(paths["report"])
+        print("[scheduler] no alpha, skip report delivery")
+        if update_state:
+            _atomic_write_json(
+                cfg["state_file"],
+                {
+                    "last_end": end.isoformat(),
+                    "last_success_job_id": paths["window_id"],
+                    "last_run_at": dt.datetime.now().isoformat(),
+                    "last_result": "skipped_no_alpha",
+                    "last_provider_result": provider_result,
+                    "last_provider_error": provider_error,
+                },
+            )
+        return 0
 
     sender_result = {
         "ok": True,
@@ -622,7 +827,9 @@ def process_one_window(
             "last_end": end.isoformat(),
             "last_success_job_id": paths["window_id"],
             "last_run_at": dt.datetime.now().isoformat(),
-            "last_result": "ok",
+            "last_result": "ok_degraded_provider" if provider_result == "error" else "ok",
+            "last_provider_result": provider_result,
+            "last_provider_error": provider_error,
             "last_sender_result": "ok" if sender_result.get("ok") else "error",
             "last_sender_provider": sender_result.get("provider"),
             "last_sender_error": sender_result.get("error"),
