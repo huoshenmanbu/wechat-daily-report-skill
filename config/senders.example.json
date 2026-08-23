@@ -1,19 +1,8 @@
 {
-  "feishu_cli_webhook": {
-    "command": ["feishu-cli"],
+  "feishu_webhook": {
     "webhook_url_env": "FEISHU_WEBHOOK_URL",
     "webhook_secret_env": "FEISHU_WEBHOOK_SECRET",
-    "message_format": "text",
-    "args_template": [
-      "webhook",
-      "send",
-      "--url",
-      "__WEBHOOK__",
-      "--msg-type",
-      "__MSG_TYPE__",
-      "--content",
-      "__CONTENT__"
-    ]
+    "message_format": "text"
   },
   "feishu_cli_card": {
     "command": ["feishu-cli"]

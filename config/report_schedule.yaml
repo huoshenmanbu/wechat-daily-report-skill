@@ -29,8 +29,8 @@ analyze_timeout_seconds: 600
 report_timeout_seconds: 300
 max_chat_chars: 200000
 
-# 发送通道（none | feishu_cli_webhook | feishu_cli_card | feishu_im_api）
-sender: feishu_cli_webhook
+# 发送通道（none | feishu_webhook | feishu_cli_webhook | feishu_cli_card | feishu_im_api）
+sender: feishu_webhook
 sender_timeout_seconds: 30
 sender_retry_times: 1
 sender_retry_backoff_seconds: 2

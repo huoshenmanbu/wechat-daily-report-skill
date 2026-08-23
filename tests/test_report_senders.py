@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """Unit tests for report_senders helpers."""
 
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
@@ -17,6 +18,7 @@ from report_senders.common.payload import build_text_payload_chunks  # noqa: E40
 from report_senders.common.sanitize import redact_sensitive  # noqa: E402
 from report_senders.feishu_cli_webhook import send_feishu_cli_webhook  # noqa: E402
 from report_senders.feishu_cli_webhook import _resolve_args_template  # noqa: E402
+from report_senders.feishu_webhook import send_feishu_webhook  # noqa: E402
 import report_senders.registry as sender_registry  # noqa: E402
 from report_senders.registry import send_report_with_retry  # noqa: E402
 
@@ -125,6 +127,82 @@ class FeishuWebhookIntegrationTests(unittest.TestCase):
         self.assertIn("--content", cmd)
 
 
+class DirectFeishuWebhookTests(unittest.TestCase):
+    @patch("report_senders.feishu_webhook.urlopen")
+    @patch("report_senders.feishu_webhook.time.time", return_value=1_700_000_000)
+    def test_send_webhook_posts_text_and_optional_signature(self, _time_mock, urlopen_mock):
+        response = MagicMock()
+        response.read.return_value = b'{"code": 0, "msg": "success"}'
+        urlopen_mock.return_value.__enter__.return_value = response
+
+        with patch.dict(
+            "os.environ",
+            {
+                "FEISHU_WEBHOOK_URL": "https://open.feishu.cn/open-apis/bot/v2/hook/abc",
+                "FEISHU_WEBHOOK_SECRET": "signing-secret",
+            },
+        ):
+            out = send_feishu_webhook(
+                {"text": "hello from test"},
+                {"feishu_webhook": {"message_format": "text"}},
+                timeout_seconds=5,
+            )
+
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["provider"], "feishu_webhook")
+        request = urlopen_mock.call_args.args[0]
+        self.assertEqual(request.full_url, "https://open.feishu.cn/open-apis/bot/v2/hook/abc")
+        self.assertEqual(urlopen_mock.call_args.kwargs["timeout"], 5)
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(body["msg_type"], "text")
+        self.assertEqual(body["content"], {"text": "hello from test"})
+        self.assertEqual(body["timestamp"], "1700000000")
+        self.assertEqual(body["sign"], "HsyfQO1P0UCajraMQX1oZdxcKNMCR4IrjjzIVqAXhEw=")
+
+    @patch("report_senders.feishu_webhook.urlopen")
+    def test_empty_or_unrecognized_response_is_not_success(self, urlopen_mock):
+        with patch.dict("os.environ", {"FEISHU_WEBHOOK_URL": "https://open.feishu.cn/open-apis/bot/v2/hook/abc"}):
+            for raw in (b"", b"{}", b'{"code": null}'):
+                with self.subTest(raw=raw):
+                    response = MagicMock()
+                    response.read.return_value = raw
+                    urlopen_mock.return_value.__enter__.return_value = response
+                    out = send_feishu_webhook({"text": "hello"}, {}, timeout_seconds=5)
+                    self.assertFalse(out["ok"])
+                    self.assertEqual(out["error_code"], "invalid_response")
+
+    @patch("report_senders.feishu_webhook.urlopen")
+    def test_unsigned_request_omits_signature_fields_and_accepts_legacy_success(self, urlopen_mock):
+        response = MagicMock()
+        response.read.return_value = b'{"StatusCode": 0, "StatusMessage": "success"}'
+        urlopen_mock.return_value.__enter__.return_value = response
+
+        with patch.dict(
+            "os.environ",
+            {"FEISHU_WEBHOOK_URL": "https://open.feishu.cn/open-apis/bot/v2/hook/abc"},
+            clear=True,
+        ):
+            out = send_feishu_webhook({"text": "hello"}, {}, timeout_seconds=5)
+
+        self.assertTrue(out["ok"])
+        body = json.loads(urlopen_mock.call_args.args[0].data.decode("utf-8"))
+        self.assertNotIn("timestamp", body)
+        self.assertNotIn("sign", body)
+
+    @patch("report_senders.feishu_webhook.urlopen")
+    def test_feishu_error_response_is_reported_without_echoing_webhook(self, urlopen_mock):
+        response = MagicMock()
+        response.read.return_value = b'{"code": 19024, "msg": "Key Words Not Found"}'
+        urlopen_mock.return_value.__enter__.return_value = response
+
+        with patch.dict("os.environ", {"FEISHU_WEBHOOK_URL": "https://open.feishu.cn/open-apis/bot/v2/hook/abc"}):
+            out = send_feishu_webhook({"text": "hello"}, {}, timeout_seconds=5)
+
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error_code"], "19024")
+        self.assertEqual(out["error"], "Key Words Not Found")
+
+
 class RegistryTests(unittest.TestCase):
     def test_none_sender_ok(self):
         out = send_report_with_retry(
@@ -148,6 +226,29 @@ class RegistryTests(unittest.TestCase):
                 retry_times=0,
                 retry_backoff_seconds=0,
             )
+
+    @patch.object(sender_registry, "send_feishu_webhook")
+    def test_direct_webhook_sender_is_dispatched(self, sender_mock):
+        sender_mock.return_value = {
+            "ok": True,
+            "provider": "feishu_webhook",
+            "message_id": None,
+            "error_code": None,
+            "error": None,
+        }
+
+        out = send_report_with_retry(
+            "feishu_webhook",
+            {"text": "x"},
+            {},
+            timeout_seconds=1,
+            retry_times=0,
+            retry_backoff_seconds=0,
+        )
+
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["provider"], "feishu_webhook")
+        sender_mock.assert_called_once()
 
     def test_retry_until_success(self):
         calls = {"n": 0}

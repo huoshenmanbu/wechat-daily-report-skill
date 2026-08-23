@@ -9,8 +9,9 @@ from typing import Any, Dict
 from report_senders.feishu_cli_card import send_feishu_cli_card
 from report_senders.feishu_cli_webhook import send_feishu_cli_webhook
 from report_senders.feishu_im_api import send_feishu_im_api
+from report_senders.feishu_webhook import send_feishu_webhook
 
-REGISTERED = {"none", "feishu_cli_webhook", "feishu_cli_card", "feishu_im_api"}
+REGISTERED = {"none", "feishu_webhook", "feishu_cli_webhook", "feishu_cli_card", "feishu_im_api"}
 
 
 def send_report_with_retry(
@@ -35,7 +36,9 @@ def send_report_with_retry(
 
     for i in range(max_tries):
         try:
-            if key == "feishu_cli_webhook":
+            if key == "feishu_webhook":
+                last = send_feishu_webhook(payload, sender_options, timeout_seconds=timeout_seconds)
+            elif key == "feishu_cli_webhook":
                 last = send_feishu_cli_webhook(payload, sender_options, timeout_seconds=timeout_seconds)
             elif key == "feishu_cli_card":
                 last = send_feishu_cli_card(payload, sender_options, timeout_seconds=timeout_seconds)

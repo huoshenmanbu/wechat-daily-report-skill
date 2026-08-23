@@ -171,7 +171,7 @@ def _load_config(path: str) -> Dict[str, Any]:
         raise ValueError(
             f"Config `provider` must be one of {sorted(_providers_allowed)}, got {cfg['provider']!r}."
         )
-    _senders_allowed = {"none", "feishu_cli_webhook", "feishu_cli_card", "feishu_im_api"}
+    _senders_allowed = {"none", "feishu_webhook", "feishu_cli_webhook", "feishu_cli_card", "feishu_im_api"}
     if cfg["sender"] not in _senders_allowed:
         raise ValueError(
             f"Config `sender` must be one of {sorted(_senders_allowed)}, got {cfg['sender']!r}."
